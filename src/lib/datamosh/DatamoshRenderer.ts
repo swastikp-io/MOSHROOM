@@ -553,6 +553,76 @@ export class DatamoshRenderer {
     return this.flipY
   }
 
+  public resetFeedback(): void {
+    const gl = this.gl
+    if (
+      !gl ||
+      !this.texCurrCamera ||
+      !this.fboFeedback[0] ||
+      !this.fboFeedback[1] ||
+      !this.fboMotion[0] ||
+      !this.fboMotion[1] ||
+      !this.fboPrevCamera ||
+      !this.progCopy
+    ) {
+      return
+    }
+
+    // If video is active and ready, upload latest frame into texCurrCamera
+    if (this.video.readyState >= 2 && this.videoWidth > 0 && this.videoHeight > 0) {
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, this.texCurrCamera)
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        0,
+        0,
+        this.videoWidth,
+        this.videoHeight,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        this.video,
+      )
+    }
+
+    gl.bindVertexArray(this.vao)
+
+    // Reset both feedback buffers with pristine current camera frame
+    for (let i = 0; i < 2; i++) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboFeedback[i])
+      gl.viewport(0, 0, this.videoWidth, this.videoHeight)
+      gl.useProgram(this.progCopy)
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, this.texCurrCamera)
+      gl.uniform1i(gl.getUniformLocation(this.progCopy, 'u_texture'), 0)
+      gl.drawArrays(gl.TRIANGLES, 0, 3)
+
+      // Clear motion textures to neutral zero motion (0.5, 0.5, 0.0, 0.0)
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboMotion[i])
+      gl.viewport(0, 0, this.motionWidth, this.motionHeight)
+      gl.clearColor(0.5, 0.5, 0.0, 0.0)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+    }
+
+    // Reset prev camera texture with current camera
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboPrevCamera)
+    gl.viewport(0, 0, this.videoWidth, this.videoHeight)
+    gl.useProgram(this.progCopy)
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, this.texCurrCamera)
+    gl.uniform1i(gl.getUniformLocation(this.progCopy, 'u_texture'), 0)
+    gl.drawArrays(gl.TRIANGLES, 0, 3)
+
+    // Reset ping-pong indices
+    this.feedbackRead = 0
+    this.feedbackWrite = 1
+    this.motionRead = 0
+    this.motionWrite = 1
+
+    // Immediately present the clean frame on screen
+    this.drawToScreen(this.texCurrCamera)
+  }
+
   private copyCurrentToPrevCamera(): void {
     const gl = this.gl!
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboPrevCamera)

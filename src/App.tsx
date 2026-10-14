@@ -5,7 +5,13 @@ import { MoshControl } from './components/MoshControl.tsx'
 
 export function App() {
   const [moshAmount, setMoshAmount] = useState<number>(45)
+  const [restoreCount, setRestoreCount] = useState<number>(0)
   const { status, error, videoRef, startCamera, stopCamera } = useCamera()
+
+  const handleRestore = () => {
+    setMoshAmount(50)
+    setRestoreCount((prev) => prev + 1)
+  }
 
   return (
     <div className="min-h-screen bg-[#050505] text-[#e5e5e5] flex flex-col justify-between p-4 sm:p-6 md:p-8 font-mono selection:bg-white selection:text-black">
@@ -35,12 +41,14 @@ export function App() {
           onStartCamera={startCamera}
           onStopCamera={stopCamera}
           moshAmount={moshAmount}
+          restoreTrigger={restoreCount}
         />
 
         {/* Primary Single Control */}
         <MoshControl
           value={moshAmount}
           onChange={setMoshAmount}
+          onRestore={handleRestore}
           disabled={status !== 'active'}
         />
       </main>

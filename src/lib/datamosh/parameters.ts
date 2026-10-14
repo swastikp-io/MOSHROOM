@@ -3,29 +3,29 @@ export interface MoshParameters {
   moshAmount: number
   /** Normalized intensity: 0.0 to 1.0 */
   intensity: number
-  /** When true (moshAmount == 0), bypass deformation shaders and render clean video */
+  /** When true (moshAmount == 0), bypass deformation shaders and render clean video (I-frame reset) */
   bypass: boolean
-  /** Macroblock size in pixels: strictly 16.0 (or 20.0 at high intensity) */
+  /** Macroblock size in pixels: 12.0 (at 1-24) scaling up to 24.0 (at 100) */
   macroblockSize: number
   /** Legacy alias for macroblockSize */
   blockSize: number
-  /** Temporal vector momentum across frames (P-frame bloom) (0.0 - 0.92) */
+  /** Temporal vector momentum across frames (P-frame bloom) (0.0 - 0.93) */
   vectorMomentum: number
   /** Legacy alias for vectorMomentum */
   vectorPersistence: number
-  /** Magnitude of UV displacement along motion vectors (0.01 - 0.22) */
+  /** Magnitude of UV displacement along motion vectors (0.01 - 0.24) */
   displacementScale: number
-  /** Temporal feedback preservation factor (0.0 - 0.988) */
+  /** Temporal feedback preservation factor (0.0 - 1.0) */
   feedbackRetention: number
-  /** Frame-by-frame visual decay to prevent permanent white-out or lockup */
+  /** Frame-by-frame visual decay: >0 at 1-24 for healing, strictly 0.0 at 25-100 for permanent freeze */
   decayRate: number
-  /** Amount of new camera frame blended into persistent areas */
+  /** Base camera leak: >0 at 1-24 for healing, strictly 0.0 at 25-100 for permanent freeze */
   residualBlend: number
   /** Quantized high-frequency P-frame residual injection intensity (0.0 - 0.85) */
   residualIntensity: number
   /** Zero-motion noise gate cost penalty for camera sensor grain */
   zeroMotionBias: number
-  /** Motion confidence threshold to trigger sub-partitioning (calmed down for 80%+ motion) */
+  /** Motion confidence threshold to trigger sub-partitioning */
   subPartitionThreshold: number
   /** Chroma plane displacement multiplier for compression-style color bleeding */
   chromaOffset: number
@@ -35,26 +35,27 @@ export interface MoshParameters {
 
 /**
  * Derives all macroblock, momentum, and P-frame displacement parameters
- * from a single 0-100 MOSHROOM AMOUNT value:
- *  - 0: Clean bypass.
- *  - 15–40: 16x16 block size, low vector momentum, fast I-frame recovery.
- *           Cohesive block dragging without shattering into confetti.
- *  - 41–75: 16x16/20x20 macroblocks with sub-partitioning restricted only to extreme contrast edges.
- *           Strong P-frame displacement, rectangular block tearing, and residual color contamination.
- *  - 76–100: Aggressive P-frame bloom (high vector momentum), maximum block displacement scale,
- *            near-zero I-frame refresh in stationary zones, and large macroblock ribbons.
+ * from a single 0-100 MOSH AMOUNT value:
+ *  - 0: Clean bypass (acts as an I-frame reset to 100% clean live video).
+ *  - 1–24: Healing range. Gradual recovery and decay are active so lowering
+ *          the slider smoothly heals and restores the image.
+ *  - 25–100: True I-frame starvation. ZERO background healing (decayRate = 0.0,
+ *            residualBlend = 0.0). Once pixels are smeared by motion, they stay
+ *            permanently frozen on screen forever until new motion pushes them again.
+ *            Higher values (25 -> 100) scale up displacement distance, vector
+ *            momentum (bloom), macroblock size (12px -> 24px), and residual edge bleeding.
  */
 export function computeMoshParameters(moshAmount: number): MoshParameters {
   const clamped = Math.max(0, Math.min(100, moshAmount))
-  const t = clamped / 100.0
+  const normIntensity = clamped / 100.0
 
   if (clamped <= 0) {
     return {
       moshAmount: 0,
       intensity: 0,
       bypass: true,
-      macroblockSize: 16.0,
-      blockSize: 16.0,
+      macroblockSize: 12.0,
+      blockSize: 12.0,
       vectorMomentum: 0,
       vectorPersistence: 0,
       displacementScale: 0,
@@ -69,53 +70,80 @@ export function computeMoshParameters(moshAmount: number): MoshParameters {
     }
   }
 
-  // Base macroblock size kept strictly at 16x16 (or 20x20 at high intensity)
-  const macroblockSize = clamped <= 50 ? 16.0 : 20.0
+  // Healing range (1 - 24): allows gradual recovery to clean webcam feed
+  if (clamped < 25) {
+    const fraction = clamped / 24.0 // 0.04 to 1.0
+    const healFactor = (25.0 - clamped) / 24.0 // 1.0 down to 0.04
 
-  // Vector momentum (P-frame bloom)
-  let vectorMomentum: number
-  if (t <= 0.40) {
-    vectorMomentum = 0.05 + 0.30 * (t / 0.40)
-  } else if (t <= 0.75) {
-    vectorMomentum = 0.35 + 0.35 * ((t - 0.40) / 0.35)
-  } else {
-    vectorMomentum = 0.70 + 0.22 * Math.pow((t - 0.75) / 0.25, 0.8)
+    const macroblockSize = 12.0
+    const vectorMomentum = 0.10 + 0.20 * fraction
+    const displacementScale = 0.012 + 0.028 * fraction
+    const feedbackRetention = 0.50 + 0.40 * fraction
+    const decayRate = 0.003 + 0.035 * healFactor
+    const residualBlend = 0.03 + 0.32 * healFactor
+    const residualIntensity = 0.05 + 0.12 * fraction
+    const zeroMotionBias = 0.035 - 0.010 * fraction
+    const subPartitionThreshold = 0.85
+    const chromaOffset = 0.3 + 0.3 * fraction
+    const motionThreshold = 0.014 - 0.004 * fraction
+
+    return {
+      moshAmount: clamped,
+      intensity: normIntensity,
+      bypass: false,
+      macroblockSize,
+      blockSize: macroblockSize,
+      vectorMomentum,
+      vectorPersistence: vectorMomentum,
+      displacementScale,
+      feedbackRetention,
+      decayRate,
+      residualBlend,
+      residualIntensity,
+      zeroMotionBias,
+      subPartitionThreshold,
+      chromaOffset,
+      motionThreshold,
+    }
   }
 
+  // True I-Frame Starvation (25 - 100):
+  // ZERO background healing: smeared pixels freeze in place permanently!
+  const t = (clamped - 25.0) / 75.0 // 0.0 to 1.0
+  const tPow = Math.pow(t, 1.25)
+
+  // Macroblock size: smoothly scales from 12px up to 24px
+  const macroblockSize = Math.round(12.0 + 12.0 * t)
+
+  // Vector momentum (P-frame bloom): carries motion forward across frames
+  const vectorMomentum = 0.35 + 0.58 * Math.pow(t, 0.85)
+
   // Displacement scale
-  const displacementScale = 0.012 + 0.19 * Math.pow(t, 1.35)
+  const displacementScale = 0.040 + 0.20 * tPow
 
-  // Feedback retention
-  const feedbackRetention = 0.38 + 0.605 * Math.sqrt(t)
+  // 100% feedback retention: zero decay, zero baseline leak
+  const feedbackRetention = 1.0
+  const decayRate = 0.0
+  const residualBlend = 0.0
 
-  // Decay rate: fast recovery at low intensity, near-zero refresh at high intensity
-  const decayRate = clamped >= 76
-    ? 0.0005 + 0.0015 * (1.0 - (clamped - 76) / 24.0)
-    : 0.002 + 0.018 * Math.pow(1.0 - t, 0.8)
+  // P-frame residual color-block injection on moving edges
+  const residualIntensity = 0.20 + 0.65 * t
 
-  // Residual camera blend
-  const residualBlend = 0.03 + 0.37 * Math.pow(1.0 - t, 0.85)
+  // Noise gate cost penalty for camera sensor grain
+  const zeroMotionBias = Math.max(0.006, 0.025 - 0.018 * t)
 
-  // P-frame residual injection
-  const residualIntensity = clamped < 15
-    ? 0.0
-    : 0.15 + 0.70 * ((clamped - 15) / 85.0)
-
-  // Zero-motion noise gate bias
-  const zeroMotionBias = Math.max(0.008, 0.038 - 0.026 * t)
-
-  // Calmed down sub-partition threshold: requires very high confidence (>0.70)
-  const subPartitionThreshold = Math.max(0.68, 0.88 - 0.20 * t)
+  // Sub-partition threshold for high-contrast edges
+  const subPartitionThreshold = Math.max(0.65, 0.82 - 0.17 * t)
 
   // Chroma plane offset
-  const chromaOffset = 0.3 + 0.7 * t
+  const chromaOffset = 0.5 + 0.5 * t
 
-  // Motion sensitivity threshold
-  const motionThreshold = Math.max(0.003, 0.015 - 0.01 * t)
+  // Motion threshold
+  const motionThreshold = Math.max(0.003, 0.010 - 0.007 * t)
 
   return {
     moshAmount: clamped,
-    intensity: t,
+    intensity: normIntensity,
     bypass: false,
     macroblockSize,
     blockSize: macroblockSize,

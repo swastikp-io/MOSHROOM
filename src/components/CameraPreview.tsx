@@ -10,6 +10,7 @@ interface CameraPreviewProps {
   onStartCamera: () => void
   onStopCamera: () => void
   moshAmount: number
+  restoreTrigger?: number
   onFpsUpdate?: (fps: number) => void
 }
 
@@ -20,6 +21,7 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
   onStartCamera,
   onStopCamera,
   moshAmount,
+  restoreTrigger,
   onFpsUpdate,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -79,6 +81,13 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
     moshAmountRef.current = moshAmount
     rendererRef.current?.setMoshAmount(moshAmount)
   }, [moshAmount])
+
+  // Restore live feed to pristine state upon restore trigger
+  useEffect(() => {
+    if (restoreTrigger && restoreTrigger > 0) {
+      rendererRef.current?.resetFeedback()
+    }
+  }, [restoreTrigger])
 
   // Synchronize renderer execution with camera active state
   useEffect(() => {

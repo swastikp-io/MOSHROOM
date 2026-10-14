@@ -9,7 +9,7 @@ import {
   DISPLAY_FRAGMENT_SHADER,
 } from '../src/lib/datamosh/shaders.ts'
 
-test('computeMoshParameters at 0 bypasses effects cleanly', () => {
+test('computeMoshParameters at 0 bypasses effects cleanly (I-frame reset)', () => {
   const p0 = computeMoshParameters(0)
   assert.equal(p0.bypass, true)
   assert.equal(p0.intensity, 0)
@@ -18,61 +18,79 @@ test('computeMoshParameters at 0 bypasses effects cleanly', () => {
   assert.equal(p0.vectorMomentum, 0)
 })
 
-test('computeMoshParameters at default value (45) produces balanced values', () => {
+test('computeMoshParameters at 1-24 enables gradual healing back to live webcam', () => {
+  const p10 = computeMoshParameters(10)
+  assert.equal(p10.bypass, false)
+  assert.ok(p10.decayRate > 0.0, 'Healing range must have decayRate > 0')
+  assert.ok(p10.residualBlend > 0.0, 'Healing range must have residualBlend > 0')
+  assert.equal(p10.macroblockSize, 12.0)
+})
+
+test('computeMoshParameters at 25 locks background healing strictly to 0.0 (permanent freeze)', () => {
+  const p25 = computeMoshParameters(25)
+  assert.equal(p25.bypass, false)
+  assert.equal(p25.decayRate, 0.0, 'MOSH AMOUNT >= 25 must have zero decay')
+  assert.equal(p25.residualBlend, 0.0, 'MOSH AMOUNT >= 25 must have zero baseline leak')
+  assert.equal(p25.macroblockSize, 12.0)
+  assert.equal(p25.feedbackRetention, 1.0)
+})
+
+test('computeMoshParameters at default value (45) operates with permanent freeze and intact tiles', () => {
   const p45 = computeMoshParameters(45)
   assert.equal(p45.bypass, false)
   assert.equal(p45.moshAmount, 45)
-  assert.ok(p45.intensity >= 0.44 && p45.intensity <= 0.46)
-  assert.equal(p45.macroblockSize, 16.0) // 16x16 macroblock for > 40
-  assert.ok(p45.displacementScale > 0.04 && p45.displacementScale < 0.12)
-  assert.ok(p45.feedbackRetention > 0.7 && p45.feedbackRetention < 0.85)
-  assert.ok(p45.vectorMomentum >= 0.35 && p45.vectorMomentum <= 0.5)
-  assert.ok(p45.residualIntensity > 0.2)
+  assert.equal(p45.decayRate, 0.0, 'Default value 45 must permanently freeze pixels')
+  assert.equal(p45.residualBlend, 0.0)
+  assert.equal(p45.feedbackRetention, 1.0)
+  assert.ok(p45.macroblockSize >= 14.0 && p45.macroblockSize <= 18.0)
+  assert.ok(p45.displacementScale > 0.04)
+  assert.ok(p45.vectorMomentum >= 0.40)
 })
 
-test('computeMoshParameters at 15-40 uses 16x16 macroblock size and low momentum', () => {
-  const p25 = computeMoshParameters(25)
-  assert.equal(p25.macroblockSize, 16.0)
-  assert.ok(p25.vectorMomentum <= 0.35)
-  assert.ok(p25.decayRate > 0.01) // Fast recovery
-})
-
-test('computeMoshParameters at 76-100 activates aggressive P-frame bloom and near-zero refresh', () => {
+test('computeMoshParameters at 76-100 activates high momentum bloom, large 24px blocks, and zero healing', () => {
   const p85 = computeMoshParameters(85)
-  assert.equal(p85.macroblockSize, 20.0)
+  assert.equal(p85.decayRate, 0.0)
+  assert.equal(p85.residualBlend, 0.0)
+  assert.equal(p85.feedbackRetention, 1.0)
+  assert.ok(p85.macroblockSize >= 20.0)
   assert.ok(p85.vectorMomentum >= 0.75, 'Momentum should be high for P-frame bloom')
-  assert.ok(p85.decayRate < 0.002, 'Decay should be near-zero in stationary zones')
   assert.ok(p85.residualIntensity > 0.6)
 
   const p100 = computeMoshParameters(100)
   assert.equal(p100.bypass, false)
   assert.equal(p100.intensity, 1.0)
-  assert.ok(p100.displacementScale > 0.18)
-  assert.ok(p100.feedbackRetention <= 0.99)
-  assert.ok(p100.feedbackRetention >= 0.95)
-  assert.ok(p100.decayRate > 0.0003) // Must maintain non-zero decay to prevent overflow
-  assert.ok(p100.residualBlend > 0.02)
-  assert.ok(p100.vectorMomentum >= 0.9)
+  assert.equal(p100.decayRate, 0.0)
+  assert.equal(p100.residualBlend, 0.0)
+  assert.equal(p100.feedbackRetention, 1.0)
+  assert.equal(p100.macroblockSize, 24.0)
+  assert.ok(p100.displacementScale >= 0.20)
+  assert.ok(p100.vectorMomentum >= 0.90)
 })
 
-test('computeMoshParameters is strictly monotonic across 1..100', () => {
+test('computeMoshParameters is strictly monotonic for displacement, retention, and momentum', () => {
   let prevDisplacement = 0
   let prevRetention = 0
   let prevMomentum = 0
+  let prevBlockSize = 0
 
   for (let amount = 1; amount <= 100; amount++) {
     const p = computeMoshParameters(amount)
     assert.ok(p.displacementScale >= prevDisplacement, `Displacement failed monotonic increase at ${amount}`)
     assert.ok(p.feedbackRetention >= prevRetention, `Retention failed monotonic increase at ${amount}`)
     assert.ok(p.vectorMomentum >= prevMomentum, `Momentum failed monotonic increase at ${amount}`)
-    assert.ok(p.decayRate >= 0 && p.decayRate <= 1.0)
-    assert.ok(p.residualBlend >= 0 && p.residualBlend <= 1.0)
-    assert.ok(p.macroblockSize === 16.0 || p.macroblockSize === 20.0)
-    assert.ok(p.vectorMomentum >= 0 && p.vectorMomentum <= 1.0)
+    assert.ok(p.macroblockSize >= prevBlockSize, `MacroblockSize failed monotonic increase at ${amount}`)
+    assert.ok(p.macroblockSize >= 12.0 && p.macroblockSize <= 24.0)
+
+    if (amount >= 25) {
+      assert.equal(p.decayRate, 0.0, `Decay must be 0 at ${amount}`)
+      assert.equal(p.residualBlend, 0.0, `Residual blend must be 0 at ${amount}`)
+      assert.equal(p.feedbackRetention, 1.0)
+    }
 
     prevDisplacement = p.displacementScale
     prevRetention = p.feedbackRetention
     prevMomentum = p.vectorMomentum
+    prevBlockSize = p.macroblockSize
   }
 })
 
@@ -84,6 +102,7 @@ test('computeMoshParameters handles negative or out-of-range values gracefully',
   const pOver = computeMoshParameters(150)
   assert.equal(pOver.moshAmount, 100)
   assert.equal(pOver.intensity, 1.0)
+  assert.equal(pOver.decayRate, 0.0)
 })
 
 test('GLSL shader sources are well-formed WebGL2 ES 3.00 shaders with macroblock uniforms', () => {

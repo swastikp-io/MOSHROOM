@@ -160,6 +160,12 @@ void main() {
   }
 
   finalVector = clamp(finalVector, vec2(-1.0), vec2(1.0));
+
+  // If vector is negligible, lock strictly to zero for permanent stationary freeze
+  if (length(finalVector) < 0.02) {
+    finalVector = vec2(0.0);
+  }
+
   float motionConfidence = clamp(length(finalVector) * 1.5, 0.0, 1.0);
   float residualError = clamp(bestSadUnpenalized / 4.5, 0.0, 1.0);
 
@@ -169,12 +175,16 @@ void main() {
 `
 
 /**
- * Discrete Macroblock Datamosh & P-Frame Displacement Fragment Shader
- * Operates with:
- *  1. Spatial 5-tap neighbor vector smoothing + snapping to prevent confetti shattering.
- *  2. Continuous pixel UV advection using uniform block vectors for coherent video tiles.
- *  3. Calmed sub-block splitting restricted only to extreme contrast edges.
- *  4. P-frame high-frequency compressed residual injection.
+ * Permanent Feedback Lock Datamosh & Intact Texture Advection Fragment Shader
+ *
+ * Implements true I-frame starvation:
+ *  1. Quantizes UV only for looking up motion vector (12px to 24px macroblock grid).
+ *  2. Displaces continuous pixel UV (v_uv) by the block's uniform motion vector so
+ *     macroblocks slide as intact, recognizable chunks of image texture.
+ *  3. Spatially averages motion with 4 neighbors to force cohesive block ribbons.
+ *  4. Permanent Feedback Lock: When motion is zero, outputs 100% of previous feedback
+ *     with ZERO decay and ZERO healing when moshAmount >= 25.
+ *  5. Active motion lightly contaminates with compressed P-frame residuals.
  */
 export const DATAMOSH_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
@@ -242,99 +252,100 @@ vec3 getSmoothedBlockMotion(sampler2D motionTex, vec2 blockUV, vec2 blockGrid) {
   vec2 avgVec = (vCenter * 2.0 + vUp + vDown + vRight + vLeft) / 6.0;
   float avgConf = (center.b * 2.0 + up.b + down.b + right.b + left.b) / 6.0;
 
-  // Snap/floor the motion vector to discrete macroblock velocity levels
-  // This locks adjacent blocks with similar motion to the exact same discrete velocity
-  const float VELOCITY_LEVELS = 14.0;
+  // Lock noise floor strictly to zero
+  if (length(avgVec) < 0.02) {
+    return vec3(0.0, 0.0, 0.0);
+  }
+
+  // Snap to discrete velocity levels
+  const float VELOCITY_LEVELS = 16.0;
   vec2 snappedVec = floor(avgVec * VELOCITY_LEVELS + 0.5) / VELOCITY_LEVELS;
 
   return vec3(snappedVec, avgConf);
 }
 
 void main() {
+  // If MOSH AMOUNT == 0, output 100% clean live camera feed (I-frame reset)
   if (u_intensity <= 0.0) {
     fragColor = texture(u_curr_frame, v_uv);
     return;
   }
 
-  // 1. Base Macroblock Grid (kept strictly large, e.g. 16x16 / 20x20 for 80%+ of motion)
-  float mbSize = u_macroblock_size;
-  vec2 blockGrid = max(vec2(4.0), u_resolution / mbSize);
+  // 1. Discrete Macroblock Grid (12px to 24px)
+  vec2 blockGrid = max(vec2(4.0), u_resolution / u_macroblock_size);
+
+  // Quantize UV ONLY when looking up the motion vector:
   vec2 blockUV = (floor(v_uv * blockGrid) + 0.5) / blockGrid;
 
+  // Sample spatially smoothed block motion
   vec3 smoothedMotion = getSmoothedBlockMotion(u_motion_texture, blockUV, blockGrid);
+  vec2 blockMotion = smoothedMotion.xy;
+  float motionMag = length(blockMotion);
   float motionConfidence = smoothedMotion.z;
 
-  // 2. Calmed Down Sub-Block Splitting:
-  // Only split into smaller blocks on extreme contrast edges (>0.30) with very high motion (>0.70)
-  vec3 currentCam = texture(u_curr_frame, v_uv).rgb;
-  float lumaCenter = getLuma(currentCam);
-  float lumaRight  = getLuma(texture(u_curr_frame, v_uv + vec2(2.0 / u_resolution.x, 0.0)).rgb);
-  float lumaUp     = getLuma(texture(u_curr_frame, v_uv + vec2(0.0, 2.0 / u_resolution.y)).rgb);
-  float edgeContrast = length(vec2(lumaRight - lumaCenter, lumaUp - lumaCenter));
-
-  if (edgeContrast > 0.30 && motionConfidence > u_sub_partition_threshold && u_intensity > 0.50) {
-    mbSize *= 0.5;
-    blockGrid = max(vec2(4.0), u_resolution / mbSize);
-    blockUV = (floor(v_uv * blockGrid) + 0.5) / blockGrid;
-    smoothedMotion = getSmoothedBlockMotion(u_motion_texture, blockUV, blockGrid);
-  }
-
-  vec2 motion = smoothedMotion.xy;
-
-  // 3. Advect UVs Smoothly, Quantize the Lookup:
-  // Calculate sourceUV using the pixel's continuous UV offset by the block's uniform motion vector.
-  // The whole block slides together as a coherent chunk of image, without turning into solid-color pixel art.
+  // 2. Intact Macroblock Texture Advection:
+  // Displace the continuous pixel UV (v_uv) by the quantized blockMotion:
+  // Each macroblock slides as an intact square tile of recognizable image texture
   const float MAX_UV_TRAVEL = 0.22;
-  vec2 uvDisplacement = motion * (u_displacement_scale * MAX_UV_TRAVEL);
+  vec2 uvDisplacement = blockMotion * (u_displacement_scale * MAX_UV_TRAVEL);
   vec2 sourceUV = clamp(v_uv - uvDisplacement, vec2(0.001), vec2(0.999));
 
-  // 4. Chroma Subsampling Displacement (4:2:0 codec motion displacement)
-  vec2 chromaGrid = max(vec2(2.0), blockGrid * 0.5);
-  vec2 chromaBlockUV = (floor(v_uv * chromaGrid) + 0.5) / chromaGrid;
-  vec3 chromaMotionData = getSmoothedBlockMotion(u_motion_texture, chromaBlockUV, chromaGrid);
-  vec2 chromaMotion = chromaMotionData.xy;
+  // Sample historical pixels at displaced continuous UV
+  vec3 displacedColor = texture(u_prev_feedback, sourceUV).rgb;
 
-  vec2 chromaDisplacement = chromaMotion * (u_displacement_scale * (1.0 + u_chroma_offset * 0.4) * MAX_UV_TRAVEL);
-  vec2 sourceChromaUV = clamp(v_uv - chromaDisplacement, vec2(0.001), vec2(0.999));
+  // 3. PERMANENT PIXEL FREEZE (True I-Frame Starvation):
+  // When motion magnitude is below noise threshold, output 100% of previous feedback.
+  // Smeared/melted pixels remain permanently frozen on screen with ZERO healing!
+  if (motionMag < 0.001) {
+    if (u_decay > 0.0 || u_residual_blend > 0.0) {
+      // Healing mode (MOSH AMOUNT 1-24): gradually restore clean camera feed
+      vec3 currentCam = texture(u_curr_frame, v_uv).rgb;
+      vec3 healed = mix(displacedColor, currentCam, u_residual_blend);
+      healed = max(vec3(0.0), healed - vec3(u_decay));
+      fragColor = vec4(clamp(healed, 0.0, 1.0), 1.0);
+    } else {
+      // Permanent lock (MOSH AMOUNT 25-100): 100% frozen persistent pixels
+      fragColor = vec4(displacedColor, 1.0);
+    }
+    return;
+  }
 
-  // Sample historical pixels at smoothly advected UV coordinates
-  vec3 prevLumaRGB = texture(u_prev_feedback, sourceUV).rgb;
-  vec3 prevChromaRGB = texture(u_prev_feedback, sourceChromaUV).rgb;
-
-  // Reconstruct in YCbCr color space
-  vec3 ycbcrLuma = rgb2ycbcr(prevLumaRGB);
-  vec3 ycbcrChroma = rgb2ycbcr(prevChromaRGB);
-  vec3 prevMosh = ycbcr2rgb(vec3(ycbcrLuma.x, ycbcrChroma.yz));
-
-  // 5. Authentic P-Frame High-Frequency Residual Injection
+  // 4. ACTIVE MOTION REGIONS (motionMag >= 0.001):
+  // Moving objects act as a brush pushing frozen pixels, lightly contaminated with residuals.
+  vec3 currentCam = texture(u_curr_frame, v_uv).rgb;
   vec3 prevCam = texture(u_prev_frame, v_uv).rgb;
   vec3 rawResidual = currentCam - prevCam;
   vec3 quantizedResidual = floor(rawResidual * 8.0 + 0.5) / 8.0;
-  float residualWeight = smoothstep(0.08, 0.35, motionConfidence) * u_residual_intensity;
-  prevMosh = clamp(prevMosh + quantizedResidual * residualWeight, 0.0, 1.0);
 
-  // 6. Persistence & Decay Blending
-  float motionActivity = smoothstep(0.04, 0.28, motionConfidence * (1.0 + u_intensity * 2.5));
-  float retention = mix(u_feedback_retention * 0.45, u_feedback_retention, motionActivity);
+  // 4:2:0 Chroma plane displacement on moving edges
+  if (u_chroma_offset > 0.0) {
+    vec2 chromaGrid = max(vec2(2.0), blockGrid * 0.5);
+    vec2 chromaBlockUV = (floor(v_uv * chromaGrid) + 0.5) / chromaGrid;
+    vec3 chromaMotion = getSmoothedBlockMotion(u_motion_texture, chromaBlockUV, chromaGrid);
+    vec2 displacedChromaUV = clamp(v_uv - chromaMotion.xy * (u_displacement_scale * (1.0 + u_chroma_offset * 0.4) * MAX_UV_TRAVEL), vec2(0.001), vec2(0.999));
+    vec3 chromaColor = texture(u_prev_feedback, displacedChromaUV).rgb;
 
-  // Stationary area decay to prevent permanent freeze
-  float stationaryDecay = u_decay * (1.0 - motionActivity * 0.9);
-  vec3 decayedMosh = max(vec3(0.0), prevMosh - vec3(stationaryDecay));
-
-  // Residual blend of live camera feed
-  float liveBlend = mix(u_residual_blend, u_residual_blend * 0.12, motionActivity * u_intensity);
-  vec3 blended = mix(currentCam, decayedMosh, retention);
-  vec3 finalColor = mix(blended, currentCam, liveBlend);
-
-  // 7. Hard Macroblock Seam Boundaries
-  if (u_intensity > 0.35) {
-    vec2 blockFrac = abs(fract(v_uv * blockGrid) - 0.5) * 2.0;
-    float edgeFactor = step(0.96, max(blockFrac.x, blockFrac.y));
-    float seamDarkening = edgeFactor * motionActivity * (u_intensity - 0.35) * 0.18;
-    finalColor = mix(finalColor, finalColor * (1.0 - seamDarkening), edgeFactor);
+    vec3 ycbcrLuma = rgb2ycbcr(displacedColor);
+    vec3 ycbcrChroma = rgb2ycbcr(chromaColor);
+    displacedColor = ycbcr2rgb(vec3(ycbcrLuma.x, ycbcrChroma.yz));
   }
 
-  // Safety clamp
+  // Inject compressed residual into displaced pixels on moving edges
+  float residualWeight = clamp(motionMag * u_residual_intensity, 0.0, 0.40);
+  vec3 moshResult = clamp(displacedColor + quantizedResidual * residualWeight, 0.0, 1.0);
+
+  // Light camera contamination: keep blend low so moving objects act primarily
+  // as an invisible brush pushing existing frozen pixels around
+  float newCamLeak = clamp(motionMag * 0.12, 0.0, 0.15);
+  vec3 finalColor = mix(moshResult, currentCam, newCamLeak);
+
+  // Subtle rectangular tile boundary emphasis at medium-to-high intensity
+  if (u_intensity > 0.30) {
+    vec2 blockFrac = abs(fract(v_uv * blockGrid) - 0.5) * 2.0;
+    float edgeFactor = step(0.96, max(blockFrac.x, blockFrac.y));
+    finalColor = mix(finalColor, finalColor * 0.90, edgeFactor * motionConfidence * 0.5);
+  }
+
   fragColor = vec4(clamp(finalColor, 0.0, 1.0), 1.0);
 }
 `

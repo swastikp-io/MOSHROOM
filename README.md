@@ -16,11 +16,10 @@ Classic datamoshing manipulates inter-frame prediction in compressed video strea
 
 ## Single Control
 
-- **MOSHROOM AMOUNT (0 – 100, default 45)**: Single continuous control that nonlinearly derives macroblock dimensions, vector momentum, displacement scale, feedback retention, and residual bleeding:
-  - **0**: Clean bypass (unprocessed camera feed).
-  - **15 – 40**: 8x8 macroblock size, low vector momentum, fast I-frame recovery. Subtle blocky pixel dragging on moving subjects.
-  - **41 – 75**: 16x16 primary macroblocks with 8x8 sub-partitioning on fast edges. Strong P-frame displacement, rectangular block tearing, and residual color contamination.
-  - **76 – 100**: Aggressive P-frame bloom (high vector momentum), maximum block displacement scale, near-zero I-frame refresh in stationary zones, and heavy macroblock sliding.
+- **MOSH AMOUNT (0 – 100, default 45)**: Single continuous control that nonlinearly derives macroblock dimensions, vector momentum, displacement scale, feedback retention, and residual bleeding:
+  - **0**: Clean bypass (acts as an immediate I-frame reset to 100% clean live video).
+  - **1 – 24**: Healing range. Gradual recovery and decay are active so lowering the slider smoothly heals and restores the image.
+  - **25 – 100**: True I-frame starvation. **Zero background healing (`decayRate = 0.0`, `baseLeak = 0.0`)**. Smeared pixels freeze permanently on screen until new motion pushes them again. Higher values scale up displacement travel, vector momentum (bloom), macroblock size (12px to 24px), and compressed P-frame edge residuals.
 
 ## Technology Stack
 
