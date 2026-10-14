@@ -1,12 +1,27 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useCamera } from './hooks/useCamera.ts'
 import { CameraPreview } from './components/CameraPreview.tsx'
 import { MoshControl } from './components/MoshControl.tsx'
+import { AudioControl } from './components/AudioControl.tsx'
+import { AudioAnalyzer } from './lib/audio/AudioAnalyzer.ts'
 
 export function App() {
   const [moshAmount, setMoshAmount] = useState<number>(45)
   const [restoreCount, setRestoreCount] = useState<number>(0)
   const { status, error, videoRef, startCamera, stopCamera } = useCamera()
+
+  const [audioAnalyzer] = useState<AudioAnalyzer | null>(() => {
+    if (typeof window !== 'undefined') {
+      return new AudioAnalyzer()
+    }
+    return null
+  })
+
+  useEffect(() => {
+    return () => {
+      audioAnalyzer?.destroy()
+    }
+  }, [audioAnalyzer])
 
   const handleRestore = () => {
     setMoshAmount(50)
@@ -32,7 +47,7 @@ export function App() {
       </header>
 
       {/* Main Content Area */}
-      <main className="w-full max-w-4xl mx-auto flex-1 flex flex-col items-center justify-center my-4 sm:my-6 gap-5">
+      <main className="w-full max-w-4xl mx-auto flex-1 flex flex-col items-center justify-center my-4 sm:my-6 gap-4">
         {/* Live Video Canvas */}
         <CameraPreview
           status={status}
@@ -42,15 +57,25 @@ export function App() {
           onStopCamera={stopCamera}
           moshAmount={moshAmount}
           restoreTrigger={restoreCount}
+          audioAnalyzer={audioAnalyzer}
         />
 
-        {/* Primary Single Control */}
-        <MoshControl
-          value={moshAmount}
-          onChange={setMoshAmount}
-          onRestore={handleRestore}
-          disabled={status !== 'active'}
-        />
+        {/* Primary Controls Group */}
+        <div className="w-full max-w-4xl flex flex-col gap-2">
+          {/* Mosh Intensity Slider */}
+          <MoshControl
+            value={moshAmount}
+            onChange={setMoshAmount}
+            onRestore={handleRestore}
+            disabled={status !== 'active'}
+          />
+
+          {/* Monochromatic Audio-Reactive Engine Control Strip */}
+          <AudioControl
+            analyzer={audioAnalyzer}
+            disabled={false}
+          />
+        </div>
       </main>
 
       {/* Minimal Footer */}

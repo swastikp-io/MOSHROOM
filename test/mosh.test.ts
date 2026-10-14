@@ -125,6 +125,7 @@ test('GLSL shader sources are well-formed WebGL2 ES 3.00 shaders with macroblock
   assert.ok(MOTION_ESTIMATION_FRAGMENT_SHADER.includes('u_prev_motion'))
   assert.ok(MOTION_ESTIMATION_FRAGMENT_SHADER.includes('u_zero_motion_bias'))
   assert.ok(MOTION_ESTIMATION_FRAGMENT_SHADER.includes('u_vector_momentum'))
+  assert.ok(MOTION_ESTIMATION_FRAGMENT_SHADER.includes('u_audioTransient'))
 
   // Check specific required uniforms in datamosh shader
   assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('u_curr_frame'))
@@ -136,6 +137,7 @@ test('GLSL shader sources are well-formed WebGL2 ES 3.00 shaders with macroblock
   assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('u_feedback_retention'))
   assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('u_residual_intensity'))
   assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('u_sub_partition_threshold'))
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('u_audioTransient'))
 
   // Check display shader aspect ratio and flip uniforms
   assert.ok(DISPLAY_FRAGMENT_SHADER.includes('u_canvas_aspect'))
@@ -143,3 +145,124 @@ test('GLSL shader sources are well-formed WebGL2 ES 3.00 shaders with macroblock
   assert.ok(DISPLAY_FRAGMENT_SHADER.includes('u_flip_y'))
   assert.ok(DISPLAY_FRAGMENT_SHADER.includes('u_flip_x'))
 })
+
+test('computeMoshParameters at restored amount (50) provides balanced freeze and macroblock displacement', () => {
+  const p50 = computeMoshParameters(50)
+  assert.equal(p50.bypass, false)
+  assert.equal(p50.moshAmount, 50)
+  assert.equal(p50.decayRate, 0.0, 'Restored value 50 must have 0 decay rate (permanent freeze)')
+  assert.equal(p50.residualBlend, 0.0)
+  assert.equal(p50.feedbackRetention, 1.0)
+  assert.equal(p50.macroblockSize, 16.0, 'Value 50 uses 16x16 macroblock grid')
+  assert.ok(p50.displacementScale >= 0.05 && p50.displacementScale <= 0.10)
+  assert.ok(p50.vectorMomentum >= 0.45 && p50.vectorMomentum <= 0.60)
+})
+
+test('audio-reactive physics respects MOSH AMOUNT = 0 as master bypass ceiling', () => {
+  const p0 = computeMoshParameters(0, {
+    bass: 1.0,
+    mid: 1.0,
+    high: 1.0,
+    transient: 1.0,
+    isPlaying: true,
+  })
+  assert.equal(p0.bypass, true, 'MOSH AMOUNT = 0 must bypass effects even if audio is full blast')
+  assert.equal(p0.displacementScale, 0)
+  assert.equal(p0.audioTransient, 0.0)
+})
+
+test('audio-reactive physics: inactive or paused audio preserves base parameters', () => {
+  const base = computeMoshParameters(50)
+  const paused = computeMoshParameters(50, {
+    bass: 0.9,
+    mid: 0.8,
+    high: 0.7,
+    transient: 0.85,
+    isPlaying: false,
+  })
+  assert.equal(paused.displacementScale, base.displacementScale)
+  assert.equal(paused.vectorMomentum, base.vectorMomentum)
+  assert.equal(paused.macroblockSize, base.macroblockSize)
+  assert.equal(paused.audioTransient, 0.0)
+})
+
+test('audio-reactive physics: bass & transient surge displacement by 1.5x to 3.0x scaled by MOSH AMOUNT', () => {
+  const base50 = computeMoshParameters(50)
+  const surged50 = computeMoshParameters(50, {
+    bass: 0.95,
+    mid: 0.4,
+    high: 0.2,
+    transient: 0.90,
+    isPlaying: true,
+  })
+
+  const ratio50 = surged50.displacementScale / base50.displacementScale
+  assert.ok(ratio50 >= 1.5 && ratio50 <= 3.0, `Displacement surge ratio at 50 was ${ratio50}, expected 1.5x-3.0x`)
+
+  const base100 = computeMoshParameters(100)
+  const surged100 = computeMoshParameters(100, {
+    bass: 1.0,
+    mid: 0.5,
+    high: 0.3,
+    transient: 1.0,
+    isPlaying: true,
+  })
+  const ratio100 = surged100.displacementScale / base100.displacementScale
+  assert.ok(ratio100 >= 2.5 && ratio100 <= 3.05, `Displacement surge ratio at 100 was ${ratio100}, expected ~3.0x`)
+})
+
+test('audio-reactive physics: heavy bass shifts macroblock size chunky (up to 24px-32px)', () => {
+  const base25 = computeMoshParameters(25)
+  assert.equal(base25.macroblockSize, 12.0)
+
+  const heavyKick = computeMoshParameters(25, {
+    bass: 1.0,
+    mid: 0.2,
+    high: 0.1,
+    transient: 0.95,
+    isPlaying: true,
+  })
+  assert.ok(heavyKick.macroblockSize >= 20.0, `Macroblock size should surge on heavy kick, got ${heavyKick.macroblockSize}`)
+  assert.ok(heavyKick.macroblockSize <= 32.0)
+})
+
+test('audio-reactive physics: sustained bass/mid boosts vector momentum', () => {
+  const base = computeMoshParameters(50)
+  const boosted = computeMoshParameters(50, {
+    bass: 0.85,
+    mid: 0.80,
+    high: 0.2,
+    transient: 0.2,
+    isPlaying: true,
+  })
+  assert.ok(boosted.vectorMomentum > base.vectorMomentum, 'Momentum should boost during sustained bass/mid')
+  assert.ok(boosted.vectorMomentum <= 0.98)
+})
+
+test('audio-reactive physics: high frequencies punch edgeBreakthrough and lower subPartitionThreshold', () => {
+  const base = computeMoshParameters(50)
+  const snareHit = computeMoshParameters(50, {
+    bass: 0.2,
+    mid: 0.5,
+    high: 0.95,
+    transient: 0.3,
+    isPlaying: true,
+  })
+  assert.ok(snareHit.edgeBreakthrough > base.edgeBreakthrough, 'edgeBreakthrough should boost on high/snare hits')
+  assert.ok(snareHit.subPartitionThreshold < base.subPartitionThreshold, 'subPartitionThreshold should lower for edge stamp')
+})
+
+test('audio-reactive physics: strong kick transient lowers motionThreshold and sets audioTransient', () => {
+  const base = computeMoshParameters(50)
+  const kick = computeMoshParameters(50, {
+    bass: 0.9,
+    mid: 0.3,
+    high: 0.1,
+    transient: 0.85,
+    isPlaying: true,
+  })
+  assert.equal(kick.audioTransient, 0.85)
+  assert.ok(kick.motionThreshold < base.motionThreshold, 'motionThreshold should be lowered on transient > 0.25')
+})
+
+

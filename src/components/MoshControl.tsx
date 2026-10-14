@@ -19,7 +19,7 @@ export const MoshControl: React.FC<MoshControlProps> = ({
   }
 
   return (
-    <div className="w-full max-w-3xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 py-3 px-4 border border-neutral-800 bg-neutral-950">
+    <div className="w-full max-w-4xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 py-3 px-4 border border-neutral-800 bg-neutral-950">
       <div className="flex items-center justify-between sm:justify-start gap-4">
         <label
           htmlFor="mosh-amount-slider"

@@ -1,4 +1,5 @@
-import { computeMoshParameters, type MoshParameters } from './parameters.ts'
+import { computeMoshParameters, applyAudioModulation, type MoshParameters } from './parameters.ts'
+import type { AudioAnalyzer } from '../audio/AudioAnalyzer.ts'
 import {
   VERTEX_SHADER,
   COPY_FRAGMENT_SHADER,
@@ -10,6 +11,7 @@ import {
 export interface RendererOptions {
   canvas: HTMLCanvasElement
   video: HTMLVideoElement
+  audioAnalyzer?: AudioAnalyzer | null
   onFpsUpdate?: (fps: number) => void
   onError?: (error: Error) => void
 }
@@ -22,6 +24,7 @@ export class DatamoshRenderer {
   private canvas: HTMLCanvasElement
   private video: HTMLVideoElement
   private gl: WebGL2RenderingContext | null = null
+  private audioAnalyzer: AudioAnalyzer | null = null
   private onFpsUpdate?: (fps: number) => void
   private onError?: (error: Error) => void
 
@@ -82,6 +85,7 @@ export class DatamoshRenderer {
   constructor(options: RendererOptions) {
     this.canvas = options.canvas
     this.video = options.video
+    this.audioAnalyzer = options.audioAnalyzer || null
     this.onFpsUpdate = options.onFpsUpdate
     this.onError = options.onError
     this.params = computeMoshParameters(this.moshAmount)
@@ -180,6 +184,7 @@ export class DatamoshRenderer {
       u_zero_motion_bias: gl.getUniformLocation(this.progMotion, 'u_zero_motion_bias'),
       u_vector_momentum: gl.getUniformLocation(this.progMotion, 'u_vector_momentum'),
       u_motion_threshold: gl.getUniformLocation(this.progMotion, 'u_motion_threshold'),
+      u_audioTransient: gl.getUniformLocation(this.progMotion, 'u_audioTransient'),
     }
 
     // Cache uniform locations for datamosh compositing
@@ -197,7 +202,8 @@ export class DatamoshRenderer {
       u_residual_intensity: gl.getUniformLocation(this.progMosh, 'u_residual_intensity'),
       u_sub_partition_threshold: gl.getUniformLocation(this.progMosh, 'u_sub_partition_threshold'),
       u_intensity: gl.getUniformLocation(this.progMosh, 'u_intensity'),
-      u_chroma_offset: gl.getUniformLocation(this.progMosh, 'u_chroma_offset'),
+      u_edge_breakthrough: gl.getUniformLocation(this.progMosh, 'u_edge_breakthrough'),
+      u_audioTransient: gl.getUniformLocation(this.progMosh, 'u_audioTransient'),
     }
 
     this.uniformsDisplay = {
@@ -321,6 +327,10 @@ export class DatamoshRenderer {
     this.params = computeMoshParameters(amount)
   }
 
+  public setAudioAnalyzer(analyzer: AudioAnalyzer | null): void {
+    this.audioAnalyzer = analyzer
+  }
+
   public start(): void {
     if (this.isRunning) return
     this.isRunning = true
@@ -429,6 +439,18 @@ export class DatamoshRenderer {
       return
     }
 
+    // Audio-reactive modulation when audio is playing
+    let currentParams = this.params
+    let audioTransient = 0.0
+
+    if (this.audioAnalyzer) {
+      const metrics = this.audioAnalyzer.getMetrics()
+      if (metrics.isPlaying) {
+        currentParams = applyAudioModulation(this.params, metrics)
+        audioTransient = metrics.transient
+      }
+    }
+
     // 2. PASS 1: Discrete Macroblock Matching Motion Estimation
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboMotion[this.motionWrite])
     gl.viewport(0, 0, this.motionWidth, this.motionHeight)
@@ -451,9 +473,10 @@ export class DatamoshRenderer {
 
     gl.uniform2f(this.uniformsMotion.u_resolution, this.motionWidth, this.motionHeight)
     gl.uniform2f(this.uniformsMotion.u_texel_size, 1.0 / this.motionWidth, 1.0 / this.motionHeight)
-    gl.uniform1f(this.uniformsMotion.u_zero_motion_bias, this.params.zeroMotionBias)
-    gl.uniform1f(this.uniformsMotion.u_vector_momentum, this.params.vectorMomentum)
-    gl.uniform1f(this.uniformsMotion.u_motion_threshold, this.params.motionThreshold)
+    gl.uniform1f(this.uniformsMotion.u_zero_motion_bias, currentParams.zeroMotionBias)
+    gl.uniform1f(this.uniformsMotion.u_vector_momentum, currentParams.vectorMomentum)
+    gl.uniform1f(this.uniformsMotion.u_motion_threshold, currentParams.motionThreshold)
+    gl.uniform1f(this.uniformsMotion.u_audioTransient, audioTransient)
 
     gl.drawArrays(gl.TRIANGLES, 0, 3)
 
@@ -483,15 +506,16 @@ export class DatamoshRenderer {
     gl.uniform1i(this.uniformsMosh.u_motion_texture, 3)
 
     gl.uniform2f(this.uniformsMosh.u_resolution, this.videoWidth, this.videoHeight)
-    gl.uniform1f(this.uniformsMosh.u_macroblock_size, this.params.macroblockSize)
-    gl.uniform1f(this.uniformsMosh.u_displacement_scale, this.params.displacementScale)
-    gl.uniform1f(this.uniformsMosh.u_feedback_retention, this.params.feedbackRetention)
-    gl.uniform1f(this.uniformsMosh.u_decay, this.params.decayRate)
-    gl.uniform1f(this.uniformsMosh.u_residual_blend, this.params.residualBlend)
-    gl.uniform1f(this.uniformsMosh.u_residual_intensity, this.params.residualIntensity)
-    gl.uniform1f(this.uniformsMosh.u_sub_partition_threshold, this.params.subPartitionThreshold)
-    gl.uniform1f(this.uniformsMosh.u_intensity, this.params.intensity)
-    gl.uniform1f(this.uniformsMosh.u_chroma_offset, this.params.chromaOffset)
+    gl.uniform1f(this.uniformsMosh.u_macroblock_size, currentParams.macroblockSize)
+    gl.uniform1f(this.uniformsMosh.u_displacement_scale, currentParams.displacementScale)
+    gl.uniform1f(this.uniformsMosh.u_feedback_retention, currentParams.feedbackRetention)
+    gl.uniform1f(this.uniformsMosh.u_decay, currentParams.decayRate)
+    gl.uniform1f(this.uniformsMosh.u_residual_blend, currentParams.residualBlend)
+    gl.uniform1f(this.uniformsMosh.u_residual_intensity, currentParams.residualIntensity)
+    gl.uniform1f(this.uniformsMosh.u_sub_partition_threshold, currentParams.subPartitionThreshold)
+    gl.uniform1f(this.uniformsMosh.u_intensity, currentParams.intensity)
+    gl.uniform1f(this.uniformsMosh.u_edge_breakthrough, currentParams.edgeBreakthrough)
+    gl.uniform1f(this.uniformsMosh.u_audioTransient, audioTransient)
 
     gl.drawArrays(gl.TRIANGLES, 0, 3)
 

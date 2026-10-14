@@ -3,6 +3,8 @@ import { Camera, CameraOff, AlertCircle, RefreshCw, Square, FlipHorizontal, Flip
 import type { CameraStatus, CameraError } from '../hooks/useCamera.ts'
 import { DatamoshRenderer } from '../lib/datamosh/DatamoshRenderer.ts'
 
+import type { AudioAnalyzer } from '../lib/audio/AudioAnalyzer.ts'
+
 interface CameraPreviewProps {
   status: CameraStatus
   error: CameraError | null
@@ -11,6 +13,7 @@ interface CameraPreviewProps {
   onStopCamera: () => void
   moshAmount: number
   restoreTrigger?: number
+  audioAnalyzer?: AudioAnalyzer | null
   onFpsUpdate?: (fps: number) => void
 }
 
@@ -22,6 +25,7 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
   onStopCamera,
   moshAmount,
   restoreTrigger,
+  audioAnalyzer,
   onFpsUpdate,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -45,6 +49,7 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
         const renderer = new DatamoshRenderer({
           canvas,
           video,
+          audioAnalyzer,
           onFpsUpdate: (currentFps) => {
             setFps(currentFps)
             onFpsUpdate?.(currentFps)
@@ -74,7 +79,12 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
       window.removeEventListener('resize', handleResize)
       resizeObserver.disconnect()
     }
-  }, [videoRef, onFpsUpdate])
+  }, [videoRef, onFpsUpdate, audioAnalyzer])
+
+  // Synchronize audio analyzer reference without resetting WebGL
+  useEffect(() => {
+    rendererRef.current?.setAudioAnalyzer(audioAnalyzer || null)
+  }, [audioAnalyzer])
 
   // Update effect intensity immediately without restarting renderer
   useEffect(() => {
