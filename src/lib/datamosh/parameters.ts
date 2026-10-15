@@ -3,6 +3,8 @@ import type { AudioMetrics } from '../audio/AudioAnalyzer.ts'
 export interface MoshParameters {
   /** Raw user slider value: 0 to 100 */
   moshAmount: number
+  /** User particle displacement slider: 0 to 100 (default: 25) */
+  particleDisplacement?: number
   /** Normalized intensity: 0.0 to 1.0 */
   intensity: number
   /** When true (moshAmount == 0), bypass deformation shaders and render clean video (I-frame reset) */
@@ -59,15 +61,24 @@ export interface MoshParameters {
 export function computeMoshParameters(
   moshAmount: number,
   audio?: AudioMetrics | null,
+  particleDisplacement = 25,
 ): MoshParameters {
   const clamped = Math.max(0, Math.min(100, moshAmount))
   const normIntensity = clamped / 100.0
+
+  const clampedDisp = Math.max(0, Math.min(100, particleDisplacement))
+  const normDisp = clampedDisp / 100.0
+  // Smooth exponential low-end curve (so low values like 2-15 stay tight and controlled)
+  // Normalized at 25 (default) to yield exactly 1.0x baseline factor
+  const defaultPower = Math.pow(0.25, 1.6)
+  const dispFactor = clampedDisp <= 0 ? 0.0 : Math.pow(normDisp, 1.6) / defaultPower
 
   let base: MoshParameters
 
   if (clamped <= 0) {
     base = {
       moshAmount: 0,
+      particleDisplacement: clampedDisp,
       intensity: 0,
       bypass: true,
       macroblockSize: 12.0,
@@ -94,7 +105,7 @@ export function computeMoshParameters(
 
     const macroblockSize = 12.0
     const vectorMomentum = 0.10 + 0.25 * fraction
-    const displacementScale = 0.012 + 0.028 * fraction
+    const displacementScale = (0.012 + 0.028 * fraction) * dispFactor
     const feedbackRetention = 0.50 + 0.40 * fraction
     const decayRate = 0.003 + 0.035 * healFactor
     const residualBlend = 0.03 + 0.32 * healFactor
@@ -108,6 +119,7 @@ export function computeMoshParameters(
 
     base = {
       moshAmount: clamped,
+      particleDisplacement: clampedDisp,
       intensity: normIntensity,
       bypass: false,
       macroblockSize,
@@ -140,7 +152,7 @@ export function computeMoshParameters(
     const vectorMomentum = 0.35 + 0.58 * Math.pow(t, 0.85)
 
     // Displacement scale: aggressively scaled for kinetic macroblock/particle fling
-    const displacementScale = 0.040 + 0.210 * tPow
+    const displacementScale = Math.min(0.85, (0.040 + 0.210 * tPow) * dispFactor)
 
     // Velocity wave momentum friction decay rate across frames (0.91 to 0.97)
     // Carries velocity waves across stationary regions for 20-60 frames
@@ -171,6 +183,7 @@ export function computeMoshParameters(
 
     base = {
       moshAmount: clamped,
+      particleDisplacement: clampedDisp,
       intensity: normIntensity,
       bypass: false,
       macroblockSize,
@@ -254,14 +267,13 @@ export function applyAudioModulation(
     base.subPartitionThreshold - 0.16 * high * intensity,
   )
 
-  // Lower motion threshold on transient kick hits so subtle motion breaks through
-  const motionThreshold = transient > 0.25
-    ? Math.max(0.001, base.motionThreshold * (1.0 - (transient - 0.25) * 0.8))
-    : base.motionThreshold
+  // Keep motion noise gate threshold strict during audio beats so webcam sensor grain never triggers
+  // fake grid motion in stationary regions (0.0 * audio = 0.0)
+  const motionThreshold = base.motionThreshold
 
-  // Audio transient / kick boosts momentum decay and advection step for explosive particle fling
-  const momentumDecay = Math.min(0.985, base.momentumDecay + 0.02 * transient * intensity)
-  const advectionStep = base.advectionStep * (1.0 + (0.4 * bass + 0.5 * transient) * intensity)
+  // Bass / Sub boosts temporal smear momentum retention up to 0.97 on existing motion
+  const momentumDecay = Math.min(0.975, base.momentumDecay + 0.03 * bass * intensity + 0.01 * transient * intensity)
+  const advectionStep = base.advectionStep * (1.0 + (0.3 * bass + 0.3 * transient) * intensity)
 
   return {
     ...base,

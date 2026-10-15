@@ -2,8 +2,8 @@ import React, { useEffect, useRef, useState } from 'react'
 import { Camera, CameraOff, AlertCircle, RefreshCw, Square, FlipHorizontal, FlipVertical } from 'lucide-react'
 import type { CameraStatus, CameraError } from '../hooks/useCamera.ts'
 import { DatamoshRenderer } from '../lib/datamosh/DatamoshRenderer.ts'
-
 import type { AudioAnalyzer } from '../lib/audio/AudioAnalyzer.ts'
+import { HandTracker } from '../lib/vision/HandTracker.ts'
 
 interface CameraPreviewProps {
   status: CameraStatus
@@ -11,10 +11,11 @@ interface CameraPreviewProps {
   videoRef: React.RefObject<HTMLVideoElement | null>
   onStartCamera: () => void
   onStopCamera: () => void
-  moshAmount: number
+  particleDisplacement?: number
   restoreTrigger?: number
   audioAnalyzer?: AudioAnalyzer | null
   onFpsUpdate?: (fps: number) => void
+  onMoshIntensityUpdate?: (intensity: number) => void
 }
 
 export const CameraPreview: React.FC<CameraPreviewProps> = ({
@@ -23,19 +24,34 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
   videoRef,
   onStartCamera,
   onStopCamera,
-  moshAmount,
+  particleDisplacement = 25,
   restoreTrigger,
   audioAnalyzer,
   onFpsUpdate,
+  onMoshIntensityUpdate,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const rendererRef = useRef<DatamoshRenderer | null>(null)
   const [webglError, setWebglError] = useState<string | null>(null)
-  const [fps, setFps] = useState<number>(0)
   const [isMirrored, setIsMirrored] = useState(true)
   const [isFlippedY, setIsFlippedY] = useState(true)
 
-  const moshAmountRef = useRef(moshAmount)
+  // Direct DOM refs to eliminate React re-renders in the 60 FPS animation loop
+  const fpsTextRef = useRef<HTMLSpanElement | null>(null)
+  const liveMoshHudRef = useRef<HTMLSpanElement | null>(null)
+  const lHandHudRef = useRef<HTMLSpanElement | null>(null)
+  const rHandHudRef = useRef<HTMLSpanElement | null>(null)
+  const engineStateRef = useRef<HTMLDivElement | null>(null)
+  const doubleFistBannerRef = useRef<HTMLDivElement | null>(null)
+
+  // Hand visualizer reticles
+  const moshHandOverlayRef = useRef<HTMLDivElement | null>(null)
+  const moshHandLabelRef = useRef<HTMLDivElement | null>(null)
+  const moshHandIconRef = useRef<HTMLDivElement | null>(null)
+
+  const audioHandOverlayRef = useRef<HTMLDivElement | null>(null)
+  const audioHandLabelRef = useRef<HTMLDivElement | null>(null)
+  const audioHandIconRef = useRef<HTMLDivElement | null>(null)
 
   // Initialize DatamoshRenderer once canvas and video are mounted
   useEffect(() => {
@@ -51,8 +67,16 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
           video,
           audioAnalyzer,
           onFpsUpdate: (currentFps) => {
-            setFps(currentFps)
+            if (fpsTextRef.current) {
+              fpsTextRef.current.textContent = `${currentFps} FPS`
+            }
             onFpsUpdate?.(currentFps)
+          },
+          onMoshIntensityUpdate: (intensity) => {
+            if (liveMoshHudRef.current) {
+              liveMoshHudRef.current.textContent = `${intensity}%`
+            }
+            onMoshIntensityUpdate?.(intensity)
           },
           onError: (err) => {
             queueMicrotask(() => setWebglError(err.message))
@@ -60,7 +84,7 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
         })
         rendererRef.current = renderer
         renderer.resizeCanvas()
-        renderer.setMoshAmount(moshAmountRef.current)
+        renderer.setParticleDisplacement(particleDisplacement)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         queueMicrotask(() => setWebglError(msg))
@@ -79,18 +103,17 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
       window.removeEventListener('resize', handleResize)
       resizeObserver.disconnect()
     }
-  }, [videoRef, onFpsUpdate, audioAnalyzer])
+  }, [videoRef, onFpsUpdate, onMoshIntensityUpdate, audioAnalyzer])
 
   // Synchronize audio analyzer reference without resetting WebGL
   useEffect(() => {
     rendererRef.current?.setAudioAnalyzer(audioAnalyzer || null)
   }, [audioAnalyzer])
 
-  // Update effect intensity immediately without restarting renderer
+  // Update particle displacement immediately without restarting renderer
   useEffect(() => {
-    moshAmountRef.current = moshAmount
-    rendererRef.current?.setMoshAmount(moshAmount)
-  }, [moshAmount])
+    rendererRef.current?.setParticleDisplacement(particleDisplacement)
+  }, [particleDisplacement])
 
   // Restore live feed to pristine state upon restore trigger
   useEffect(() => {
@@ -111,6 +134,197 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
     }
   }, [status])
 
+  // Hand-Tracking Loop: Controls Mosh Brush (Right Hand) and Audio Playback (Left Hand)
+  // Operates purely via DOM refs and WebGL uniforms — zero React setState calls per frame!
+  useEffect(() => {
+    if (status !== 'active') {
+      return
+    }
+
+    let isSubscribed = true
+    const tracker = new HandTracker()
+
+    tracker.init().then((ready) => {
+      if (isSubscribed && ready && engineStateRef.current) {
+        engineStateRef.current.textContent = 'HAND ENGINE: ACTIVE'
+      }
+    })
+
+    let animId: number
+    let pauseDebounceTimeout: ReturnType<typeof setTimeout> | null = null
+    let lastHudUpdateTime = 0
+
+    const detectLoop = () => {
+      animId = requestAnimationFrame(detectLoop)
+      const video = videoRef.current
+      const renderer = rendererRef.current
+      if (!video || video.readyState < 2 || !renderer) return
+
+      const now = performance.now()
+      const tracking = tracker.detect(video, now, isMirrored)
+
+      // 1. Double Fist Gesture: Clean I-Frame Reset
+      if (tracking.doubleFistDetected) {
+        renderer.resetFeedback()
+        if (doubleFistBannerRef.current) {
+          doubleFistBannerRef.current.style.display = 'block'
+        }
+        setTimeout(() => {
+          if (doubleFistBannerRef.current) {
+            doubleFistBannerRef.current.style.display = 'none'
+          }
+        }, 650)
+      }
+
+      // 2. Right Hand: Datamosh Brush & Particle Trigger
+      if (tracking.moshHand) {
+        if (tracking.moshHand.isOpen) {
+          // Open hand: active datamosh displacement brush
+          const brushRadius = 0.15 + Math.min(0.15, tracking.moshHand.pinchDistance * 0.75)
+          renderer.setMoshHand(
+            true,
+            tracking.moshHand.palmPosition,
+            tracking.moshHand.palmVelocity,
+            brushRadius,
+          )
+        } else {
+          // Closed fist: immediate freeze/lock
+          renderer.setMoshHand(
+            false,
+            tracking.moshHand.palmPosition,
+            [0, 0],
+            0.20,
+          )
+        }
+      } else {
+        // No hand in frame: zero displacement, zero drift
+        renderer.setMoshHand(false, [0.5, 0.5], [0, 0], 0.20)
+      }
+
+      // 3. Left Hand: Audio Playback & Audio-Reactivity Gain
+      let currentGain = 1.0
+      if (tracking.audioHand) {
+        const normHeight = Math.max(0.0, Math.min(1.0, 1.0 - tracking.audioHand.palmPosition[1]))
+        renderer.setLeftHand(tracking.audioHand.isOpen, normHeight)
+
+        if (tracking.audioHand.isOpen) {
+          // Open hand: ensure playing
+          if (pauseDebounceTimeout) {
+            clearTimeout(pauseDebounceTimeout)
+            pauseDebounceTimeout = null
+          }
+          if (audioAnalyzer && !audioAnalyzer.getIsPlaying()) {
+            audioAnalyzer.play().catch(() => {})
+          }
+
+          // Vertical height maps to audio reactivity intensity (0.3 to 2.0)
+          currentGain = 0.3 + 1.7 * normHeight
+          renderer.setAudioReactivityGain(currentGain)
+        } else {
+          // Closed fist: 200ms debounce before pausing to prevent tracking jitter
+          if (!pauseDebounceTimeout && audioAnalyzer?.getIsPlaying()) {
+            pauseDebounceTimeout = setTimeout(() => {
+              audioAnalyzer?.pause()
+              pauseDebounceTimeout = null
+            }, 200)
+          }
+        }
+      } else {
+        renderer.setLeftHand(false, 0)
+        if (pauseDebounceTimeout) {
+          clearTimeout(pauseDebounceTimeout)
+          pauseDebounceTimeout = null
+        }
+        renderer.setAudioReactivityGain(1.0)
+      }
+
+      // 4. Update Hand Visualizer Reticles via direct DOM refs
+      const moshOverlayEl = moshHandOverlayRef.current
+      if (moshOverlayEl) {
+        if (tracking.moshHand) {
+          moshOverlayEl.style.display = 'block'
+          moshOverlayEl.style.left = `${tracking.moshHand.screenPosition[0] * 100}%`
+          moshOverlayEl.style.top = `${tracking.moshHand.screenPosition[1] * 100}%`
+
+          if (moshHandLabelRef.current) {
+            moshHandLabelRef.current.textContent = tracking.moshHand.isOpen
+              ? 'MOSH BRUSH'
+              : 'LOCKED'
+            moshHandLabelRef.current.className = tracking.moshHand.isOpen
+              ? 'mt-1 px-1.5 py-0.5 bg-black/90 border border-neutral-700 text-[9px] font-mono text-white tracking-widest whitespace-nowrap'
+              : 'mt-1 px-1.5 py-0.5 bg-black/90 border border-neutral-700 text-[9px] font-mono text-neutral-400 tracking-widest whitespace-nowrap'
+          }
+          if (moshHandIconRef.current) {
+            moshHandIconRef.current.innerHTML = tracking.moshHand.isOpen
+              ? '<div class="w-12 h-12 border border-white/70 flex items-center justify-center"><div class="w-1 h-1 bg-white"></div></div>'
+              : '<div class="w-9 h-9 border border-neutral-400 bg-neutral-950/70 flex items-center justify-center"><div class="w-2.5 h-2.5 bg-neutral-300"></div></div>'
+          }
+        } else {
+          moshOverlayEl.style.display = 'none'
+        }
+      }
+
+      const audioOverlayEl = audioHandOverlayRef.current
+      if (audioOverlayEl) {
+        if (tracking.audioHand) {
+          audioOverlayEl.style.display = 'block'
+          audioOverlayEl.style.left = `${tracking.audioHand.screenPosition[0] * 100}%`
+          audioOverlayEl.style.top = `${tracking.audioHand.screenPosition[1] * 100}%`
+
+          if (audioHandLabelRef.current) {
+            audioHandLabelRef.current.textContent = tracking.audioHand.isOpen
+              ? `AUDIO x${currentGain.toFixed(1)}`
+              : 'PAUSED'
+            audioHandLabelRef.current.className = tracking.audioHand.isOpen
+              ? 'mt-1 px-1.5 py-0.5 bg-black/90 border border-neutral-700 text-[9px] font-mono text-white tracking-widest whitespace-nowrap'
+              : 'mt-1 px-1.5 py-0.5 bg-black/90 border border-neutral-700 text-[9px] font-mono text-neutral-400 tracking-widest whitespace-nowrap'
+          }
+          if (audioHandIconRef.current) {
+            audioHandIconRef.current.innerHTML = tracking.audioHand.isOpen
+              ? '<div class="w-12 h-12 border border-white/70 flex items-center justify-center"><div class="w-1 h-1 bg-white"></div></div>'
+              : '<div class="w-9 h-9 border border-neutral-400 bg-neutral-950/70 flex items-center justify-center text-[10px] text-neutral-300">❚❚</div>'
+          }
+        } else {
+          audioOverlayEl.style.display = 'none'
+        }
+      }
+
+      // 5. Throttled DOM HUD Status Strip Updates (~180ms)
+      if (now - lastHudUpdateTime > 180) {
+        lastHudUpdateTime = now
+
+        if (lHandHudRef.current) {
+          if (!tracking.audioHand) {
+            lHandHudRef.current.innerHTML = '<span class="text-neutral-600">IDLE</span>'
+          } else if (tracking.audioHand.isOpen) {
+            lHandHudRef.current.innerHTML = `<span class="text-white font-medium flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-white animate-pulse"></span>PLAYING (x${currentGain.toFixed(1)})</span>`
+          } else {
+            lHandHudRef.current.innerHTML = '<span class="text-neutral-400">PAUSED (FIST)</span>'
+          }
+        }
+
+        if (rHandHudRef.current) {
+          if (!tracking.moshHand) {
+            rHandHudRef.current.innerHTML = '<span class="text-neutral-600">IDLE</span>'
+          } else if (tracking.moshHand.isOpen) {
+            rHandHudRef.current.innerHTML = '<span class="text-white font-medium flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-white animate-pulse"></span>ACTIVE (DISPLACE)</span>'
+          } else {
+            rHandHudRef.current.innerHTML = '<span class="text-neutral-400">LOCKED (FIST)</span>'
+          }
+        }
+      }
+    }
+
+    animId = requestAnimationFrame(detectLoop)
+
+    return () => {
+      isSubscribed = false
+      cancelAnimationFrame(animId)
+      if (pauseDebounceTimeout) clearTimeout(pauseDebounceTimeout)
+      tracker.destroy()
+    }
+  }, [status, isMirrored, audioAnalyzer, videoRef])
+
   const handleToggleMirror = () => {
     if (rendererRef.current) {
       const val = rendererRef.current.toggleMirror()
@@ -125,42 +339,20 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
     }
   }
 
-  // Cleanup renderer on unmount
-  useEffect(() => {
-    return () => {
-      if (rendererRef.current) {
-        rendererRef.current.destroy()
-        rendererRef.current = null
-      }
-    }
-  }, [])
-
   return (
-    <div className="relative w-full max-w-4xl aspect-video bg-black border border-neutral-800 flex items-center justify-center overflow-hidden shadow-2xl">
-      {/* 
-        Video element is attached to DOM to ensure Chromium / Safari decodes frames,
-        visually hidden without using `display: none`.
-      */}
+    <div className="relative w-full aspect-video bg-[#050505] border border-neutral-800 flex items-center justify-center overflow-hidden">
+      {/* Off-screen source video element */}
       <video
         ref={videoRef}
-        muted
         playsInline
-        autoPlay
-        style={{
-          position: 'absolute',
-          width: '1px',
-          height: '1px',
-          opacity: 0.001,
-          pointerEvents: 'none',
-          zIndex: -1,
-        }}
-        aria-hidden="true"
+        muted
+        className="hidden"
       />
 
-      {/* Main WebGL2 Video Processing Canvas */}
+      {/* Primary Hardware-Accelerated WebGL2 Canvas */}
       <canvas
         ref={canvasRef}
-        className="w-full h-full block bg-black"
+        className="w-full h-full object-cover"
         style={{
           display: status === 'active' ? 'block' : 'none',
         }}
@@ -173,7 +365,7 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
             <span>LIVE FEED</span>
             <span className="text-neutral-600">|</span>
-            <span className="tabular-nums text-neutral-400">{fps} FPS</span>
+            <span ref={fpsTextRef} className="tabular-nums text-neutral-400">0 FPS</span>
           </div>
 
           <div className="flex items-center gap-2">
@@ -216,6 +408,76 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
               <Square className="w-3 h-3 fill-current text-neutral-400" />
               <span>STOP</span>
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Visual Canvas Reticles for Detected Hands (Driven directly via DOM ref styles) */}
+      {status === 'active' && (
+        <>
+          <div
+            ref={moshHandOverlayRef}
+            className="absolute pointer-events-none transition-transform duration-75 ease-out select-none z-10"
+            style={{ display: 'none', transform: 'translate(-50%, -50%)' }}
+          >
+            <div className="relative flex flex-col items-center">
+              <div ref={moshHandIconRef} />
+              <div ref={moshHandLabelRef} />
+            </div>
+          </div>
+
+          <div
+            ref={audioHandOverlayRef}
+            className="absolute pointer-events-none transition-transform duration-75 ease-out select-none z-10"
+            style={{ display: 'none', transform: 'translate(-50%, -50%)' }}
+          >
+            <div className="relative flex flex-col items-center">
+              <div ref={audioHandIconRef} />
+              <div ref={audioHandLabelRef} />
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Dual-Hand Tracking Brutalist HUD Strip */}
+      {status === 'active' && (
+        <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between pointer-events-none select-none z-10">
+          <div className="flex items-center gap-2">
+            {/* L-Hand Audio Status Pill */}
+            <div className="flex items-center gap-2 px-2.5 py-1 bg-black/85 border border-neutral-800 text-[11px] font-mono tracking-wider">
+              <span className="text-neutral-500">L-HAND [AUDIO]:</span>
+              <span ref={lHandHudRef}>
+                <span className="text-neutral-600">IDLE</span>
+              </span>
+            </div>
+
+            {/* R-Hand Mosh Status Pill */}
+            <div className="flex items-center gap-2 px-2.5 py-1 bg-black/85 border border-neutral-800 text-[11px] font-mono tracking-wider">
+              <span className="text-neutral-500">R-HAND [MOSH]:</span>
+              <span ref={rHandHudRef}>
+                <span className="text-neutral-600">IDLE</span>
+              </span>
+            </div>
+
+            {/* Live Computed Mosh Intensity Pill */}
+            <div className="flex items-center gap-2 px-2.5 py-1 bg-black/85 border border-neutral-800 text-[11px] font-mono tracking-wider">
+              <span className="text-neutral-500">MOSH:</span>
+              <span ref={liveMoshHudRef} className="text-white font-medium tabular-nums">0%</span>
+            </div>
+          </div>
+
+          {/* Double Fist Reset Flash Banner */}
+          <div
+            ref={doubleFistBannerRef}
+            style={{ display: 'none' }}
+            className="px-3 py-1 bg-white text-black font-bold text-xs tracking-widest uppercase border border-white animate-bounce"
+          >
+            I-FRAME RESET
+          </div>
+
+          {/* MediaPipe Engine State indicator */}
+          <div ref={engineStateRef} className="text-[10px] text-neutral-600 hidden md:block">
+            HAND ENGINE: INIT...
           </div>
         </div>
       )}

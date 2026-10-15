@@ -13,6 +13,7 @@ export interface RendererOptions {
   video: HTMLVideoElement
   audioAnalyzer?: AudioAnalyzer | null
   onFpsUpdate?: (fps: number) => void
+  onMoshIntensityUpdate?: (intensityPercent: number) => void
   onError?: (error: Error) => void
 }
 
@@ -41,6 +42,7 @@ export class DatamoshRenderer {
 
   // VAO (required in WebGL2)
   private vao: WebGLVertexArrayObject | null = null
+  private extColorBufferFloat: unknown = null
 
   // Textures
   private texCurrCamera: WebGLTexture | null = null
@@ -66,7 +68,6 @@ export class DatamoshRenderer {
   private motionWrite = 1
 
   // Parameters & Loop State
-  private moshAmount = 45
   private params: MoshParameters
   private isRunning = false
   private isContextLost = false
@@ -82,13 +83,35 @@ export class DatamoshRenderer {
   private lastFpsTimestamp = 0
   private currentFps = 30
 
+  // Hand Tracking State (Right Hand = Mosh Brush, Left Hand = Audio Reactivity)
+  private moshHandActive = 0.0
+  private moshHandPos: [number, number] = [0.5, 0.5]
+  private moshHandVel: [number, number] = [0.0, 0.0]
+  private moshHandRadius = 0.20
+  private targetMoshHandActive = 0.0
+  private targetMoshHandPos: [number, number] = [0.5, 0.5]
+  private targetMoshHandVel: [number, number] = [0.0, 0.0]
+  private targetMoshHandRadius = 0.20
+  private audioReactivityGain = 1.0
+
+  // Dynamic Hand & Audio-Driven Mosh Intensity
+  private particleDisplacement = 25
+  private effectiveMoshAmount = 0
+  private leftHandHeight = 0
+  private leftHandActive = false
+  private onMoshIntensityUpdate?: (intensityPercent: number) => void
+  private lastIntensityNotifyTime = 0
+  private lastReportedIntensity = -1
+  private lastVideoTime = -1
+
   constructor(options: RendererOptions) {
     this.canvas = options.canvas
     this.video = options.video
     this.audioAnalyzer = options.audioAnalyzer || null
     this.onFpsUpdate = options.onFpsUpdate
+    this.onMoshIntensityUpdate = options.onMoshIntensityUpdate
     this.onError = options.onError
-    this.params = computeMoshParameters(this.moshAmount)
+    this.params = computeMoshParameters(65, null, this.particleDisplacement)
 
     this.onContextLost = this.onContextLost.bind(this)
     this.onContextRestored = this.onContextRestored.bind(this)
@@ -114,6 +137,7 @@ export class DatamoshRenderer {
     }
 
     this.gl = gl
+    this.extColorBufferFloat = gl.getExtension('EXT_color_buffer_float')
     this.canvas.addEventListener('webglcontextlost', this.onContextLost, false)
     this.canvas.addEventListener('webglcontextrestored', this.onContextRestored, false)
 
@@ -183,8 +207,17 @@ export class DatamoshRenderer {
       u_texel_size: gl.getUniformLocation(this.progMotion, 'u_texel_size'),
       u_zero_motion_bias: gl.getUniformLocation(this.progMotion, 'u_zero_motion_bias'),
       u_vector_momentum: gl.getUniformLocation(this.progMotion, 'u_vector_momentum'),
+      u_momentum_decay: gl.getUniformLocation(this.progMotion, 'u_momentum_decay'),
+      u_advection_step: gl.getUniformLocation(this.progMotion, 'u_advection_step'),
       u_motion_threshold: gl.getUniformLocation(this.progMotion, 'u_motion_threshold'),
       u_audioTransient: gl.getUniformLocation(this.progMotion, 'u_audioTransient'),
+      u_audioBass: gl.getUniformLocation(this.progMotion, 'u_audioBass'),
+      u_audioMid: gl.getUniformLocation(this.progMotion, 'u_audioMid'),
+      u_audioHigh: gl.getUniformLocation(this.progMotion, 'u_audioHigh'),
+      u_moshHandActive: gl.getUniformLocation(this.progMotion, 'u_moshHandActive'),
+      u_moshHandPos: gl.getUniformLocation(this.progMotion, 'u_moshHandPos'),
+      u_moshHandVel: gl.getUniformLocation(this.progMotion, 'u_moshHandVel'),
+      u_moshHandRadius: gl.getUniformLocation(this.progMotion, 'u_moshHandRadius'),
     }
 
     // Cache uniform locations for datamosh compositing
@@ -204,6 +237,13 @@ export class DatamoshRenderer {
       u_intensity: gl.getUniformLocation(this.progMosh, 'u_intensity'),
       u_edge_breakthrough: gl.getUniformLocation(this.progMosh, 'u_edge_breakthrough'),
       u_audioTransient: gl.getUniformLocation(this.progMosh, 'u_audioTransient'),
+      u_audioBass: gl.getUniformLocation(this.progMosh, 'u_audioBass'),
+      u_audioMid: gl.getUniformLocation(this.progMosh, 'u_audioMid'),
+      u_audioHigh: gl.getUniformLocation(this.progMosh, 'u_audioHigh'),
+      u_moshHandActive: gl.getUniformLocation(this.progMosh, 'u_moshHandActive'),
+      u_moshHandPos: gl.getUniformLocation(this.progMosh, 'u_moshHandPos'),
+      u_moshHandVel: gl.getUniformLocation(this.progMosh, 'u_moshHandVel'),
+      u_moshHandRadius: gl.getUniformLocation(this.progMosh, 'u_moshHandRadius'),
     }
 
     this.uniformsDisplay = {
@@ -220,6 +260,9 @@ export class DatamoshRenderer {
     height: number,
     minFilter: number = this.gl!.LINEAR,
     magFilter: number = this.gl!.LINEAR,
+    internalFormat?: number,
+    format?: number,
+    type?: number,
   ): WebGLTexture {
     const gl = this.gl!
     const tex = gl.createTexture()
@@ -234,12 +277,12 @@ export class DatamoshRenderer {
     gl.texImage2D(
       gl.TEXTURE_2D,
       0,
-      gl.RGBA8,
+      internalFormat ?? gl.RGBA8,
       width,
       height,
       0,
-      gl.RGBA,
-      gl.UNSIGNED_BYTE,
+      format ?? gl.RGBA,
+      type ?? gl.UNSIGNED_BYTE,
       null,
     )
     return tex
@@ -274,9 +317,9 @@ export class DatamoshRenderer {
     this.videoWidth = width
     this.videoHeight = height
 
-    // Render motion estimation at coarse macroblock grid (e.g. width / 8 by height / 8)
-    this.motionWidth = Math.max(16, Math.round(width / 8))
-    this.motionHeight = Math.max(9, Math.round(height / 8))
+    // Render motion estimation at coarse macroblock grid (strictly width / 16 by height / 16)
+    this.motionWidth = Math.max(16, Math.floor(width / 16))
+    this.motionHeight = Math.max(9, Math.floor(height / 16))
 
     this.deleteBuffers()
 
@@ -286,8 +329,11 @@ export class DatamoshRenderer {
     this.fboPrevCamera = this.createFramebuffer(this.texPrevCamera)
 
     // Motion textures & FBOs with strict gl.NEAREST filtering for hard-edged block boundaries
-    this.texMotion[0] = this.createTexture(this.motionWidth, this.motionHeight, gl.NEAREST, gl.NEAREST)
-    this.texMotion[1] = this.createTexture(this.motionWidth, this.motionHeight, gl.NEAREST, gl.NEAREST)
+    // Uses RGBA16F half-float precision if EXT_color_buffer_float is supported, falls back to RGBA8
+    const motionInternal = this.extColorBufferFloat ? gl.RGBA16F : gl.RGBA8
+    const motionType = this.extColorBufferFloat ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE
+    this.texMotion[0] = this.createTexture(this.motionWidth, this.motionHeight, gl.NEAREST, gl.NEAREST, motionInternal, gl.RGBA, motionType)
+    this.texMotion[1] = this.createTexture(this.motionWidth, this.motionHeight, gl.NEAREST, gl.NEAREST, motionInternal, gl.RGBA, motionType)
     this.fboMotion[0] = this.createFramebuffer(this.texMotion[0])
     this.fboMotion[1] = this.createFramebuffer(this.texMotion[1])
 
@@ -323,8 +369,25 @@ export class DatamoshRenderer {
   }
 
   public setMoshAmount(amount: number): void {
-    this.moshAmount = amount
-    this.params = computeMoshParameters(amount)
+    this.effectiveMoshAmount = amount
+    this.params = computeMoshParameters(amount, null, this.particleDisplacement)
+  }
+
+  public setParticleDisplacement(displacement: number): void {
+    this.particleDisplacement = Math.max(0, Math.min(100, displacement))
+    this.params = computeMoshParameters(this.effectiveMoshAmount, null, this.particleDisplacement)
+  }
+
+  public getParticleDisplacement(): number {
+    return this.particleDisplacement
+  }
+
+  public getEffectiveMoshAmount(): number {
+    return Math.round(this.effectiveMoshAmount)
+  }
+
+  public getParams(): MoshParameters {
+    return this.params
   }
 
   public setAudioAnalyzer(analyzer: AudioAnalyzer | null): void {
@@ -391,94 +454,199 @@ export class DatamoshRenderer {
 
     gl.bindVertexArray(this.vao)
 
-    // 1. Upload new video frame into texCurrCamera
-    gl.activeTexture(gl.TEXTURE0)
-    gl.bindTexture(gl.TEXTURE_2D, this.texCurrCamera)
-    gl.texSubImage2D(
-      gl.TEXTURE_2D,
-      0,
-      0,
-      0,
-      this.videoWidth,
-      this.videoHeight,
-      gl.RGBA,
-      gl.UNSIGNED_BYTE,
-      this.video,
-    )
+    const isNewCameraFrame = (this.video.currentTime !== this.lastVideoTime) && (this.video.readyState >= 2)
 
-    // First frame initialization: initialize feedback, prev camera, and motion ping-pong
-    if (!this.hasInitializedFrames) {
-      for (let i = 0; i < 2; i++) {
-        gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboFeedback[i])
+    if (isNewCameraFrame) {
+      this.lastVideoTime = this.video.currentTime
+
+      // 1. Upload new video frame into texCurrCamera using preallocated texture
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, this.texCurrCamera)
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        0,
+        0,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        this.video,
+      )
+
+      // First frame initialization: initialize feedback, prev camera, and motion ping-pong
+      if (!this.hasInitializedFrames) {
+        for (let i = 0; i < 2; i++) {
+          // Initialize feedback buffers to zero contamination (alpha = 0.0)
+          gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboFeedback[i])
+          gl.viewport(0, 0, this.videoWidth, this.videoHeight)
+          gl.clearColor(0.0, 0.0, 0.0, 0.0)
+          gl.clear(gl.COLOR_BUFFER_BIT)
+
+          // Clear motion textures to neutral zero motion (0.5, 0.5, 0.0, 0.0)
+          gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboMotion[i])
+          gl.viewport(0, 0, this.motionWidth, this.motionHeight)
+          gl.clearColor(0.5, 0.5, 0.0, 0.0)
+          gl.clear(gl.COLOR_BUFFER_BIT)
+        }
+
+        // Initialize prev camera texture
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboPrevCamera)
         gl.viewport(0, 0, this.videoWidth, this.videoHeight)
         gl.useProgram(this.progCopy)
         gl.uniform1i(gl.getUniformLocation(this.progCopy!, 'u_texture'), 0)
         gl.drawArrays(gl.TRIANGLES, 0, 3)
 
-        // Clear motion textures to neutral zero motion (0.5, 0.5, 0.0, 0.0)
-        gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboMotion[i])
-        gl.viewport(0, 0, this.motionWidth, this.motionHeight)
-        gl.clearColor(0.5, 0.5, 0.0, 0.0)
-        gl.clear(gl.COLOR_BUFFER_BIT)
+        this.hasInitializedFrames = true
       }
-
-      // Initialize prev camera texture
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboPrevCamera)
-      gl.viewport(0, 0, this.videoWidth, this.videoHeight)
-      gl.useProgram(this.progCopy)
-      gl.uniform1i(gl.getUniformLocation(this.progCopy!, 'u_texture'), 0)
-      gl.drawArrays(gl.TRIANGLES, 0, 3)
-
-      this.hasInitializedFrames = true
     }
 
-    // Handle bypass (MOSHROOM AMOUNT == 0)
-    if (this.params.bypass) {
-      this.drawToScreen(this.texCurrCamera)
-      this.copyCurrentToPrevCamera()
-      return
-    }
+    // Smoothly interpolate hand tracking parameters to prevent discrete pops
+    this.moshHandActive += (this.targetMoshHandActive - this.moshHandActive) * 0.45
+    this.moshHandPos[0] += (this.targetMoshHandPos[0] - this.moshHandPos[0]) * 0.45
+    this.moshHandPos[1] += (this.targetMoshHandPos[1] - this.moshHandPos[1]) * 0.45
+    this.moshHandVel[0] += (this.targetMoshHandVel[0] - this.moshHandVel[0]) * 0.45
+    this.moshHandVel[1] += (this.targetMoshHandVel[1] - this.moshHandVel[1]) * 0.45
+    this.moshHandRadius += (this.targetMoshHandRadius - this.moshHandRadius) * 0.35
 
-    // Audio-reactive modulation when audio is playing
-    let currentParams = this.params
+    // Read audio metrics
+    let audioBass = 0.0
+    let audioMid = 0.0
+    let audioHigh = 0.0
     let audioTransient = 0.0
+    let isAudioPlaying = false
+    let rawAudioMetrics = { bass: 0, mid: 0, high: 0, transient: 0, isPlaying: false }
 
     if (this.audioAnalyzer) {
-      const metrics = this.audioAnalyzer.getMetrics()
-      if (metrics.isPlaying) {
-        currentParams = applyAudioModulation(this.params, metrics)
-        audioTransient = metrics.transient
+      rawAudioMetrics = this.audioAnalyzer.getMetrics()
+      isAudioPlaying = rawAudioMetrics.isPlaying
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // DYNAMIC MOSH INTENSITY CALCULATION:
+    // Derives moshAmount directly from Left Hand height + audio and Right Hand motion
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    // 1. Right Hand Active (Mosh Brush Gesture):
+    // Open right hand provides automatic baseline mosh intensity (60 to 75 scaled by movement/openness)
+    let rightHandBaseline = 0
+    if (this.targetMoshHandActive > 0.05) {
+      const rSpeed = Math.hypot(this.moshHandVel[0], this.moshHandVel[1])
+      rightHandBaseline = Math.min(85, 62 + rSpeed * 28)
+    }
+
+    // 2. Left Hand Active (Audio Playback & Mosh Intensity Controller):
+    let leftHandMosh = 0
+    if (this.leftHandActive) {
+      const audioEnergy = Math.min(1.0, rawAudioMetrics.bass * 0.65 + rawAudioMetrics.transient * 0.85)
+      const audioDrivenMosh = (this.leftHandHeight * 55) + (audioEnergy * 45 * this.leftHandHeight)
+      const leftBaseline = this.leftHandHeight * 50
+      leftHandMosh = Math.max(leftBaseline, audioDrivenMosh)
+    }
+
+    // Combined target mosh amount
+    const targetMosh = Math.min(100, Math.max(rightHandBaseline, leftHandMosh))
+
+    // Smoothly interpolate effectiveMoshAmount: fast attack, smooth decay
+    if (targetMosh > this.effectiveMoshAmount) {
+      this.effectiveMoshAmount += (targetMosh - this.effectiveMoshAmount) * 0.28
+    } else {
+      this.effectiveMoshAmount += (targetMosh - this.effectiveMoshAmount) * 0.05
+    }
+
+    // Notify UI of live mosh intensity (throttled to ~180ms and only on value change)
+    const nowMs = performance.now()
+    if (nowMs - this.lastIntensityNotifyTime > 180) {
+      const rounded = Math.round(this.effectiveMoshAmount)
+      if (rounded !== this.lastReportedIntensity) {
+        this.lastReportedIntensity = rounded
+        this.lastIntensityNotifyTime = nowMs
+        this.onMoshIntensityUpdate?.(rounded)
       }
     }
 
+    // Compute parameters dynamically from effectiveMoshAmount and particleDisplacement slider
+    let currentParams = computeMoshParameters(
+      this.effectiveMoshAmount,
+      isAudioPlaying ? rawAudioMetrics : null,
+      this.particleDisplacement,
+    )
+
+    // Ensure 100% permanent freeze retention when idling or decaying (0 healing)
+    // Smeared pixels stay permanently frozen until RESTORE is clicked or new motion sweeps over them
+    if (this.effectiveMoshAmount > 0 || !this.targetMoshHandActive) {
+      currentParams = {
+        ...currentParams,
+        bypass: false,
+        feedbackRetention: 1.0,
+        decayRate: 0.0,
+        residualBlend: 0.0,
+      }
+    }
+
+    if (isAudioPlaying) {
+      const gain = this.audioReactivityGain
+      const scaledMetrics = {
+        bass: Math.min(1.0, rawAudioMetrics.bass * gain),
+        mid: Math.min(1.0, rawAudioMetrics.mid * gain),
+        high: Math.min(1.0, rawAudioMetrics.high * gain),
+        transient: Math.min(1.0, rawAudioMetrics.transient * gain),
+        isPlaying: true,
+      }
+      currentParams = applyAudioModulation(currentParams, scaledMetrics)
+      audioBass = scaledMetrics.bass
+      audioMid = scaledMetrics.mid
+      audioHigh = scaledMetrics.high
+      audioTransient = scaledMetrics.transient
+    }
+
+    this.params = currentParams
+
     // 2. PASS 1: Discrete Macroblock Matching Motion Estimation
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboMotion[this.motionWrite])
-    gl.viewport(0, 0, this.motionWidth, this.motionHeight)
-    gl.useProgram(this.progMotion)
+    // Execute ONLY when a new webcam frame has arrived to conserve GPU bandwidth
+    if (isNewCameraFrame) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboMotion[this.motionWrite])
+      gl.viewport(0, 0, this.motionWidth, this.motionHeight)
+      gl.useProgram(this.progMotion)
 
-    // Current camera (unit 0)
-    gl.activeTexture(gl.TEXTURE0)
-    gl.bindTexture(gl.TEXTURE_2D, this.texCurrCamera)
-    gl.uniform1i(this.uniformsMotion.u_curr_frame, 0)
+      // Current camera (unit 0)
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, this.texCurrCamera)
+      gl.uniform1i(this.uniformsMotion.u_curr_frame, 0)
 
-    // Previous camera (unit 1)
-    gl.activeTexture(gl.TEXTURE1)
-    gl.bindTexture(gl.TEXTURE_2D, this.texPrevCamera)
-    gl.uniform1i(this.uniformsMotion.u_prev_frame, 1)
+      // Previous camera (unit 1)
+      gl.activeTexture(gl.TEXTURE1)
+      gl.bindTexture(gl.TEXTURE_2D, this.texPrevCamera)
+      gl.uniform1i(this.uniformsMotion.u_prev_frame, 1)
 
-    // Previous motion texture (unit 2) for temporal vector momentum (P-frame bloom)
-    gl.activeTexture(gl.TEXTURE2)
-    gl.bindTexture(gl.TEXTURE_2D, this.texMotion[this.motionRead])
-    gl.uniform1i(this.uniformsMotion.u_prev_motion, 2)
+      // Previous motion texture (unit 2) for temporal vector momentum (P-frame bloom)
+      gl.activeTexture(gl.TEXTURE2)
+      gl.bindTexture(gl.TEXTURE_2D, this.texMotion[this.motionRead])
+      gl.uniform1i(this.uniformsMotion.u_prev_motion, 2)
 
-    gl.uniform2f(this.uniformsMotion.u_resolution, this.motionWidth, this.motionHeight)
-    gl.uniform2f(this.uniformsMotion.u_texel_size, 1.0 / this.motionWidth, 1.0 / this.motionHeight)
-    gl.uniform1f(this.uniformsMotion.u_zero_motion_bias, currentParams.zeroMotionBias)
-    gl.uniform1f(this.uniformsMotion.u_vector_momentum, currentParams.vectorMomentum)
-    gl.uniform1f(this.uniformsMotion.u_motion_threshold, currentParams.motionThreshold)
-    gl.uniform1f(this.uniformsMotion.u_audioTransient, audioTransient)
+      gl.uniform2f(this.uniformsMotion.u_resolution, this.motionWidth, this.motionHeight)
+      gl.uniform2f(this.uniformsMotion.u_texel_size, 1.0 / this.motionWidth, 1.0 / this.motionHeight)
+      gl.uniform1f(this.uniformsMotion.u_zero_motion_bias, currentParams.zeroMotionBias)
+      gl.uniform1f(this.uniformsMotion.u_vector_momentum, currentParams.vectorMomentum)
+      gl.uniform1f(this.uniformsMotion.u_momentum_decay, currentParams.momentumDecay)
+      gl.uniform1f(this.uniformsMotion.u_advection_step, currentParams.advectionStep)
+      gl.uniform1f(this.uniformsMotion.u_motion_threshold, currentParams.motionThreshold)
+      gl.uniform1f(this.uniformsMotion.u_audioTransient, audioTransient)
+      gl.uniform1f(this.uniformsMotion.u_audioBass, audioBass)
+      gl.uniform1f(this.uniformsMotion.u_audioMid, audioMid)
+      gl.uniform1f(this.uniformsMotion.u_audioHigh, audioHigh)
+      gl.uniform1f(this.uniformsMotion.u_moshHandActive, this.moshHandActive)
+      gl.uniform2f(this.uniformsMotion.u_moshHandPos, this.moshHandPos[0], this.moshHandPos[1])
+      gl.uniform2f(this.uniformsMotion.u_moshHandVel, this.moshHandVel[0], this.moshHandVel[1])
+      gl.uniform1f(this.uniformsMotion.u_moshHandRadius, this.moshHandRadius)
 
-    gl.drawArrays(gl.TRIANGLES, 0, 3)
+      gl.drawArrays(gl.TRIANGLES, 0, 3)
+
+      // Update previous camera frame via GPU copy
+      this.copyCurrentToPrevCamera()
+
+      // Swap motion ping-pong so motionRead points to the fresh motion texture
+      this.motionRead = 1 - this.motionRead
+      this.motionWrite = 1 - this.motionWrite
+    }
 
     // 3. PASS 2: Macroblock Datamoshing & P-Frame Displacement Feedback
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboFeedback[this.feedbackWrite])
@@ -500,9 +668,9 @@ export class DatamoshRenderer {
     gl.bindTexture(gl.TEXTURE_2D, this.texFeedback[this.feedbackRead])
     gl.uniform1i(this.uniformsMosh.u_prev_feedback, 2)
 
-    // Unit 3: Quantized motion texture (gl.NEAREST)
+    // Unit 3: Quantized motion texture (gl.NEAREST) - reads latest computed motion field
     gl.activeTexture(gl.TEXTURE3)
-    gl.bindTexture(gl.TEXTURE_2D, this.texMotion[this.motionWrite])
+    gl.bindTexture(gl.TEXTURE_2D, this.texMotion[this.motionRead])
     gl.uniform1i(this.uniformsMosh.u_motion_texture, 3)
 
     gl.uniform2f(this.uniformsMosh.u_resolution, this.videoWidth, this.videoHeight)
@@ -516,20 +684,22 @@ export class DatamoshRenderer {
     gl.uniform1f(this.uniformsMosh.u_intensity, currentParams.intensity)
     gl.uniform1f(this.uniformsMosh.u_edge_breakthrough, currentParams.edgeBreakthrough)
     gl.uniform1f(this.uniformsMosh.u_audioTransient, audioTransient)
+    gl.uniform1f(this.uniformsMosh.u_audioBass, audioBass)
+    gl.uniform1f(this.uniformsMosh.u_audioMid, audioMid)
+    gl.uniform1f(this.uniformsMosh.u_audioHigh, audioHigh)
+    gl.uniform1f(this.uniformsMosh.u_moshHandActive, this.moshHandActive)
+    gl.uniform2f(this.uniformsMosh.u_moshHandPos, this.moshHandPos[0], this.moshHandPos[1])
+    gl.uniform2f(this.uniformsMosh.u_moshHandVel, this.moshHandVel[0], this.moshHandVel[1])
+    gl.uniform1f(this.uniformsMosh.u_moshHandRadius, this.moshHandRadius)
 
     gl.drawArrays(gl.TRIANGLES, 0, 3)
 
     // 4. PASS 3: Display to canvas default framebuffer (with aspect-ratio cover)
     this.drawToScreen(this.texFeedback[this.feedbackWrite])
 
-    // Update previous camera frame via GPU copy
-    this.copyCurrentToPrevCamera()
-
-    // Ping-pong swaps
+    // Ping-pong swaps for feedback
     this.feedbackRead = 1 - this.feedbackRead
     this.feedbackWrite = 1 - this.feedbackWrite
-    this.motionRead = 1 - this.motionRead
-    this.motionWrite = 1 - this.motionWrite
   }
 
   private drawToScreen(sourceTexture: WebGLTexture | null): void {
@@ -577,6 +747,31 @@ export class DatamoshRenderer {
     return this.flipY
   }
 
+  public setMoshHand(
+    active: boolean,
+    pos: [number, number],
+    vel: [number, number],
+    radius = 0.20,
+  ): void {
+    this.targetMoshHandActive = active ? 1.0 : 0.0
+    this.targetMoshHandPos = [pos[0], pos[1]]
+    this.targetMoshHandVel = [vel[0], vel[1]]
+    this.targetMoshHandRadius = radius
+  }
+
+  public setLeftHand(active: boolean, height: number): void {
+    this.leftHandActive = active
+    this.leftHandHeight = Math.max(0.0, Math.min(1.0, height))
+  }
+
+  public setAudioReactivityGain(gain: number): void {
+    this.audioReactivityGain = Math.max(0.1, Math.min(3.0, gain))
+  }
+
+  public getAudioReactivityGain(): number {
+    return this.audioReactivityGain
+  }
+
   public resetFeedback(): void {
     const gl = this.gl
     if (
@@ -611,15 +806,12 @@ export class DatamoshRenderer {
 
     gl.bindVertexArray(this.vao)
 
-    // Reset both feedback buffers with pristine current camera frame
+    // Reset both feedback buffers to zero contamination (alpha = 0.0)
     for (let i = 0; i < 2; i++) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboFeedback[i])
       gl.viewport(0, 0, this.videoWidth, this.videoHeight)
-      gl.useProgram(this.progCopy)
-      gl.activeTexture(gl.TEXTURE0)
-      gl.bindTexture(gl.TEXTURE_2D, this.texCurrCamera)
-      gl.uniform1i(gl.getUniformLocation(this.progCopy, 'u_texture'), 0)
-      gl.drawArrays(gl.TRIANGLES, 0, 3)
+      gl.clearColor(0.0, 0.0, 0.0, 0.0)
+      gl.clear(gl.COLOR_BUFFER_BIT)
 
       // Clear motion textures to neutral zero motion (0.5, 0.5, 0.0, 0.0)
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboMotion[i])

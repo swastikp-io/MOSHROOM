@@ -56,6 +56,15 @@ uniform float u_zero_motion_bias;// Cost penalty on non-zero displacements (nois
 uniform float u_vector_momentum; // Temporal vector momentum (P-frame bloom)
 uniform float u_motion_threshold;// Noise floor threshold
 uniform float u_audioTransient;  // Audio transient / kick onset uniform
+uniform float u_audioBass;       // Audio bass energy (multiplies organic smear momentum)
+uniform float u_audioMid;        // Audio mid energy
+uniform float u_audioHigh;       // Audio high energy
+uniform float u_momentum_decay;  // Velocity friction decay factor across frames (0.90 - 0.97)
+uniform float u_advection_step;  // UV advection step factor for self-advecting motion field
+uniform float u_moshHandActive;  // 1.0 = open right hand (actively moshing), 0.0 = no hand or closed fist (locked)
+uniform vec2 u_moshHandPos;      // Palm UV position (0.0 - 1.0)
+uniform vec2 u_moshHandVel;      // Hand velocity vector in UV space
+uniform float u_moshHandRadius;  // Brush radius in UV space
 
 out vec4 fragColor;
 
@@ -71,154 +80,142 @@ float sampleLuma(sampler2D tex, vec2 uv) {
 }
 
 void main() {
-  // Step inside macroblock to evaluate a 3x3 structural pattern
-  vec2 sub = u_texel_size * 0.3333;
-
-  // 1. Patch Evaluation: Sample 3x3 structural pattern in current camera frame
-  float c00 = sampleLuma(u_curr_frame, v_uv + vec2(-sub.x, -sub.y));
-  float c10 = sampleLuma(u_curr_frame, v_uv + vec2(   0.0, -sub.y));
-  float c20 = sampleLuma(u_curr_frame, v_uv + vec2( sub.x, -sub.y));
-  float c01 = sampleLuma(u_curr_frame, v_uv + vec2(-sub.x,    0.0));
-  float c11 = sampleLuma(u_curr_frame, v_uv);
-  float c21 = sampleLuma(u_curr_frame, v_uv + vec2( sub.x,    0.0));
-  float c02 = sampleLuma(u_curr_frame, v_uv + vec2(-sub.x,  sub.y));
-  float c12 = sampleLuma(u_curr_frame, v_uv + vec2(   0.0,  sub.y));
-  float c22 = sampleLuma(u_curr_frame, v_uv + vec2( sub.x,  sub.y));
+  // 1. Center sample in current frame
+  float cCenter = sampleLuma(u_curr_frame, v_uv);
 
   // 2. Zero-Displacement Evaluation: Sample previous frame at center
-  float p00 = sampleLuma(u_prev_frame, v_uv + vec2(-sub.x, -sub.y));
-  float p10 = sampleLuma(u_prev_frame, v_uv + vec2(   0.0, -sub.y));
-  float p20 = sampleLuma(u_prev_frame, v_uv + vec2( sub.x, -sub.y));
-  float p01 = sampleLuma(u_prev_frame, v_uv + vec2(-sub.x,    0.0));
-  float p11 = sampleLuma(u_prev_frame, v_uv);
-  float p21 = sampleLuma(u_prev_frame, v_uv + vec2( sub.x,    0.0));
-  float p02 = sampleLuma(u_prev_frame, v_uv + vec2(-sub.x,  sub.y));
-  float p12 = sampleLuma(u_prev_frame, v_uv + vec2(   0.0,  sub.y));
-  float p22 = sampleLuma(u_prev_frame, v_uv + vec2( sub.x,  sub.y));
+  float pCenter = sampleLuma(u_prev_frame, v_uv);
+  float sadZero = abs(cCenter - pCenter);
 
-  float sadZero = abs(c00 - p00) + abs(c10 - p10) + abs(c20 - p20) +
-                  abs(c01 - p01) + abs(c11 - p11) + abs(c21 - p21) +
-                  abs(c02 - p02) + abs(c12 - p12) + abs(c22 - p22);
-
-  // 3. Discrete Block-Matching Neighborhood Search (SAD)
+  // 3. Fast 9-Point Cross / Diamond Search (Center + 4 Inner Cardinal + 4 Outer Cardinal/Diagonal)
   float effectiveZeroBias = u_zero_motion_bias;
   float effectiveThreshold = u_motion_threshold;
-  if (u_audioTransient > 0.25) {
-    float gateRelax = clamp((u_audioTransient - 0.25) * 1.25, 0.0, 0.85);
-    effectiveZeroBias *= (1.0 - gateRelax);
-    effectiveThreshold *= (1.0 - gateRelax);
-  }
 
   float minSad = sadZero;
   vec2 bestOffset = vec2(0.0);
   float bestSadUnpenalized = sadZero;
 
-  for (float dy = -3.0; dy <= 3.0; dy += 1.0) {
-    for (float dx = -3.0; dx <= 3.0; dx += 1.0) {
-      if (dx == 0.0 && dy == 0.0) continue;
+  const vec2 SEARCH_OFFSETS[9] = vec2[9](
+    vec2( 0.0,  0.0),
+    vec2( 1.0,  0.0),
+    vec2(-1.0,  0.0),
+    vec2( 0.0,  1.0),
+    vec2( 0.0, -1.0),
+    vec2( 2.0,  0.0),
+    vec2(-2.0,  0.0),
+    vec2( 0.0,  2.0),
+    vec2( 0.0, -2.0)
+  );
 
-      vec2 off = vec2(dx, dy) * u_texel_size;
-      vec2 testUV = v_uv + off;
+  for (int i = 1; i < 9; i++) {
+    vec2 off = SEARCH_OFFSETS[i] * u_texel_size;
+    float pSample = sampleLuma(u_prev_frame, v_uv + off);
+    float sad = abs(cCenter - pSample);
 
-      float q00 = sampleLuma(u_prev_frame, testUV + vec2(-sub.x, -sub.y));
-      float q10 = sampleLuma(u_prev_frame, testUV + vec2(   0.0, -sub.y));
-      float q20 = sampleLuma(u_prev_frame, testUV + vec2( sub.x, -sub.y));
-      float q01 = sampleLuma(u_prev_frame, testUV + vec2(-sub.x,    0.0));
-      float q11 = sampleLuma(u_prev_frame, testUV);
-      float q21 = sampleLuma(u_prev_frame, testUV + vec2( sub.x,    0.0));
-      float q02 = sampleLuma(u_prev_frame, testUV + vec2(-sub.x,  sub.y));
-      float q12 = sampleLuma(u_prev_frame, testUV + vec2(   0.0,  sub.y));
-      float q22 = sampleLuma(u_prev_frame, testUV + vec2( sub.x,  sub.y));
+    float penalty = effectiveZeroBias * (1.0 + length(SEARCH_OFFSETS[i]) * 0.20);
+    float totalCost = sad + penalty;
 
-      float sad = abs(c00 - q00) + abs(c10 - q10) + abs(c20 - q20) +
-                  abs(c01 - q01) + abs(c11 - q11) + abs(c21 - q21) +
-                  abs(c02 - q02) + abs(c12 - q12) + abs(c22 - q22);
-
-      // Zero-Motion Bias (Noise Gate): Add cost penalty to non-zero displacements
-      float penalty = effectiveZeroBias * (1.0 + length(vec2(dx, dy)) * 0.18);
-      float totalCost = sad + penalty;
-
-      if (totalCost < minSad) {
-        minSad = totalCost;
-        bestOffset = off;
-        bestSadUnpenalized = sad;
-      }
+    if (totalCost < minSad) {
+      minSad = totalCost;
+      bestOffset = off;
+      bestSadUnpenalized = sad;
     }
   }
 
-  // Noise gate: if improvement over zero-displacement is within sensor noise floor, lock to (0,0)
+  // Strict Noise Gate: if improvement over zero-displacement is within sensor noise floor, lock to (0,0)
   if ((sadZero - bestSadUnpenalized) < effectiveThreshold) {
     bestOffset = vec2(0.0);
   }
 
-  // Normalize displacement vector (-1.0 to 1.0) based on max search radius (3 blocks)
-  const float MAX_BLOCK_SEARCH = 3.0;
+  // Normalize displacement vector (-1.0 to 1.0) based on max search radius (2 blocks)
+  const float MAX_BLOCK_SEARCH = 2.0;
   vec2 currVector = clamp((bestOffset / u_texel_size) / MAX_BLOCK_SEARCH, vec2(-1.0), vec2(1.0));
+
+  // Hand-Gated Motion & Kinetic Velocity Injection:
+  // When no mosh hand is open (u_moshHandActive < 0.05), camera sensor grain is gated to 0.0!
+  if (u_moshHandActive < 0.05) {
+    currVector = vec2(0.0);
+  } else {
+    // Open right hand acts as an active datamosh & particle brush
+    float handDist = length(v_uv - u_moshHandPos);
+    float handInfluence = smoothstep(u_moshHandRadius, u_moshHandRadius * 0.25, handDist);
+    // Gate optical flow to the brush area and inject hand kinetic velocity
+    currVector = currVector * handInfluence + u_moshHandVel * 3.5 * handInfluence;
+  }
   float currMag = length(currVector);
 
-  // Gradient calculation across the macroblock patch for beat-driven macroblock jolt
-  float gradX = (c20 + 2.0 * c21 + c22) - (c00 + 2.0 * c01 + c02);
-  float gradY = (c02 + 2.0 * c12 + c22) - (c00 + 2.0 * c10 + c20);
-  vec2 blockGrad = vec2(gradX, gradY);
+  // 4. Self-Advecting Temporal Motion Field (Travelling Momentum Wave)
+  // Sample local previous motion at current cell
+  vec4 localPrevSample = texture(u_prev_motion, v_uv);
+  vec2 localPrevVec = (localPrevSample.rg - 0.5) * 2.0;
 
-  if (u_audioTransient > 0.25) {
-    float transientFactor = clamp((u_audioTransient - 0.25) / 0.75, 0.0, 1.0);
-    if (length(blockGrad) > 0.015) {
-      vec2 gradDir = normalize(blockGrad);
-      // Quantize to 8 discrete macroblock angles (stair-stepped tearing)
-      float angle = atan(gradDir.y, gradDir.x);
-      float snappedAngle = floor(angle / 0.785398 + 0.5) * 0.785398;
-      vec2 nudgeVec = vec2(cos(snappedAngle), sin(snappedAngle));
-      currVector += nudgeVec * (0.38 * transientFactor);
-    } else {
-      vec2 gridPhase = sign(fract(v_uv * 8.0) - 0.5);
-      currVector += gridPhase * (0.12 * transientFactor);
-    }
-    currVector = clamp(currVector, vec2(-1.0), vec2(1.0));
-    currMag = length(currVector);
-  }
+  // Look back along the velocity vector to carry motion forward across frames
+  vec2 advectOffset = localPrevVec * u_texel_size * u_advection_step;
+  vec2 advectUV = clamp(v_uv - advectOffset, vec2(0.001), vec2(0.999));
+  vec4 advectedSample = texture(u_prev_motion, advectUV);
+  vec2 advectedVec = (advectedSample.rg - 0.5) * 2.0;
 
-  // 4. Temporal Vector Momentum (P-Frame Bloom)
-  //    Uses strong momentum mix so vectors carry forward across frames as sweeping waves
-  vec4 prevMotionSample = texture(u_prev_motion, v_uv);
-  vec2 prevVector = (prevMotionSample.rg - 0.5) * 2.0;
-  float prevMag = prevMotionSample.b;
-
-  // 5. 9-Tap Spatial Neighborhood Averaging (3x3 macroblock neighborhood)
-  //    Smooth the current vector by averaging with all 8 surrounding blocks
-  //    so neighboring macroblocks align into cohesive ribbon flows
+  // 5. 9-Tap Spatial Neighborhood Sweep:
+  // Propagate momentum outward into stationary regions (like the background wall)
   vec2 nAvg = currVector;
   float nCount = 1.0;
+  vec2 incomingMomentum = vec2(0.0);
+  float maxIncomingMag = 0.0;
+
   for (float ny = -1.0; ny <= 1.0; ny += 1.0) {
     for (float nx = -1.0; nx <= 1.0; nx += 1.0) {
       if (nx == 0.0 && ny == 0.0) continue;
-      vec2 nUV = clamp(v_uv + vec2(nx, ny) * u_texel_size, vec2(0.001), vec2(0.999));
+      vec2 offsetUV = vec2(nx, ny) * u_texel_size;
+      vec2 nUV = clamp(v_uv + offsetUV, vec2(0.001), vec2(0.999));
       vec4 nSample = texture(u_prev_motion, nUV);
       vec2 nVec = (nSample.rg - 0.5) * 2.0;
-      // Weight center-adjacent blocks more, diagonals less
+      float nMag = length(nVec);
+
       float w = (abs(nx) + abs(ny) > 1.5) ? 0.5 : 1.0;
       nAvg += nVec * w;
       nCount += w;
+
+      if (nMag > 0.04) {
+        vec2 dirToCenter = -normalize(vec2(nx, ny));
+        float alignment = dot(normalize(nVec), dirToCenter);
+        if (alignment > 0.15) {
+          float incomingStr = nMag * alignment;
+          if (incomingStr > maxIncomingMag) {
+            maxIncomingMag = incomingStr;
+            incomingMomentum = nVec;
+          }
+        }
+      }
     }
   }
-  vec2 spatialSmoothed = nAvg / nCount;
 
-  // Blend current detection with spatial consensus
+  vec2 spatialSmoothed = nAvg / nCount;
   currVector = mix(currVector, spatialSmoothed, 0.45);
 
+  // Strongest carried momentum (advected along vector or propagating from adjacent neighbor)
+  vec2 carriedMomentum = advectedVec;
+  if (maxIncomingMag > length(carriedMomentum)) {
+    carriedMomentum = incomingMomentum;
+  }
+  float carriedMag = length(carriedMomentum);
+
   vec2 finalVector = vec2(0.0);
-  if (currMag > 0.04) {
-    // Strong temporal momentum: mix(currentMotion, prevMotion, momentum)
-    // This makes head turns / hand waves create sweeping directional waves
-    finalVector = mix(currVector, prevVector, u_vector_momentum);
-  } else if (prevMag > 0.05 && u_vector_momentum > 0.35) {
-    finalVector = prevVector * (u_vector_momentum * 0.94);
+  if (u_moshHandActive < 0.05) {
+    // Fist closed or no hand detected: instant freeze/lock of all vectors
+    finalVector = vec2(0.0);
+  } else if (currMag > 0.04) {
+    // Active motion detected: mix with carried momentum wave
+    finalVector = mix(currVector, carriedMomentum, u_vector_momentum);
+  } else if (carriedMag > 0.03 && u_momentum_decay > 0.5) {
+    // Audio Bass increases temporal momentum retention on EXISTING motion vectors up to 0.97
+    float effectiveDecay = min(0.975, u_momentum_decay + u_audioBass * 0.03);
+    finalVector = carriedMomentum * effectiveDecay;
   }
 
   finalVector = clamp(finalVector, vec2(-1.0), vec2(1.0));
 
-  // If vector is negligible, lock strictly to zero for permanent stationary freeze
-  float zeroFloor = (u_audioTransient > 0.25) ? 0.005 : 0.02;
+  // Strict zero floor: stationary regions stay strictly zero (0.0 * audio = 0.0)
+  const float zeroFloor = 0.012;
   if (length(finalVector) < zeroFloor) {
     finalVector = vec2(0.0);
   }
@@ -227,6 +224,7 @@ void main() {
   float residualError = clamp(bestSadUnpenalized / 4.5, 0.0, 1.0);
 
   // 6. Output Encoding: (vector.x, vector.y, confidence, residual)
+  // Biased to 0.5 so both negative and positive velocities are preserved in unsigned textures
   fragColor = vec4(finalVector * 0.5 + 0.5, motionConfidence, residualError);
 }
 `
@@ -238,14 +236,11 @@ void main() {
  * All pixel advection and blending uses original video colors with +50% saturation
  * boost applied only to incoming camera frames (never re-boosted on feedback).
  *
- *  1. Macroblock Grid Advection: Quantized motion vectors displace intact chunks
- *     of the previous feedback buffer as cohesive macroblock ribbons.
- *  2. Permanent Feedback Lock: Zero-motion regions stay permanently frozen.
- *  3. Feature Contrast Mask: High-contrast features (eyes, lips, dark edges)
- *     selectively punch through the melted canvas.
- *  4. Cohesive Ribbon Flow: 9-tap spatial smoothing + velocity snapping.
- *  5. +50% Saturation Boost: Incoming camera pixels are saturation-boosted 1.5x
- *     before any blending so smeared trails retain rich, vivid natural colors.
+ *  1. Two-Tier Grid: Primary Macroblocks (16px–28px) & Micro-Particles (4px–10px)
+ *  2. Micro-Particle Scatter & Ejection: 0.6x to 2.8x speed variation + +/-18° angular spread
+ *  3. Amplified UV Displacement Scale: Flings pixel blocks 50 to 200+ pixels across screen
+ *  4. Permanent Feedback Lock: Zero-motion regions stay 100% frozen (0.0 live camera healing)
+ *  5. Audio Kick Particle Burst: Transient onset scatters particles outward from active edges
  */
 export const DATAMOSH_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
@@ -268,6 +263,13 @@ uniform float u_sub_partition_threshold;
 uniform float u_intensity;
 uniform float u_edge_breakthrough;
 uniform float u_audioTransient;
+uniform float u_audioBass;
+uniform float u_audioMid;
+uniform float u_audioHigh;
+uniform float u_moshHandActive;
+uniform vec2 u_moshHandPos;
+uniform vec2 u_moshHandVel;
+uniform float u_moshHandRadius;
 
 out vec4 fragColor;
 
@@ -290,62 +292,30 @@ vec3 boostSaturation(vec3 rgb, float satFactor) {
 // 9-tap neighborhood averaging + velocity snapping for thick macroblock ribbons
 // ═══════════════════════════════════════════════════════════════════════════════
 
-vec3 getSmoothedBlockMotion(sampler2D motionTex, vec2 blockUV, vec2 blockGrid) {
-  vec2 mbStep = 1.0 / blockGrid;
+// ═══════════════════════════════════════════════════════════════════════════════
+// FAST SINGLE-TAP MACROBLOCK MOTION LOOKUP
+// Relies on the low-res spatial smoothing already performed in the Motion FBO pass
+// ═══════════════════════════════════════════════════════════════════════════════
 
-  // 9-tap neighborhood: center + 8 surrounding blocks
+vec3 getSingleTapBlockMotion(sampler2D motionTex, vec2 blockUV) {
   vec4 center = texture(motionTex, blockUV);
-  vec4 up     = texture(motionTex, clamp(blockUV + vec2(0.0, mbStep.y), vec2(0.001), vec2(0.999)));
-  vec4 down   = texture(motionTex, clamp(blockUV - vec2(0.0, mbStep.y), vec2(0.001), vec2(0.999)));
-  vec4 right  = texture(motionTex, clamp(blockUV + vec2(mbStep.x, 0.0), vec2(0.001), vec2(0.999)));
-  vec4 left   = texture(motionTex, clamp(blockUV - vec2(mbStep.x, 0.0), vec2(0.001), vec2(0.999)));
-  vec4 upL    = texture(motionTex, clamp(blockUV + vec2(-mbStep.x, mbStep.y), vec2(0.001), vec2(0.999)));
-  vec4 upR    = texture(motionTex, clamp(blockUV + vec2( mbStep.x, mbStep.y), vec2(0.001), vec2(0.999)));
-  vec4 dnL    = texture(motionTex, clamp(blockUV + vec2(-mbStep.x,-mbStep.y), vec2(0.001), vec2(0.999)));
-  vec4 dnR    = texture(motionTex, clamp(blockUV + vec2( mbStep.x,-mbStep.y), vec2(0.001), vec2(0.999)));
-
-  // Decode motion vectors from [0,1] to [-1,1]
   vec2 vCenter = (center.rg - 0.5) * 2.0;
-  vec2 vUp     = (up.rg - 0.5) * 2.0;
-  vec2 vDown   = (down.rg - 0.5) * 2.0;
-  vec2 vRight  = (right.rg - 0.5) * 2.0;
-  vec2 vLeft   = (left.rg - 0.5) * 2.0;
-  vec2 vUpL    = (upL.rg - 0.5) * 2.0;
-  vec2 vUpR    = (upR.rg - 0.5) * 2.0;
-  vec2 vDnL    = (dnL.rg - 0.5) * 2.0;
-  vec2 vDnR    = (dnR.rg - 0.5) * 2.0;
 
-  // Weighted 9-tap average: center 3x, cardinal 1.5x, diagonal 0.7x
-  vec2 avgVec = vCenter * 3.0
-              + (vUp + vDown + vRight + vLeft) * 1.5
-              + (vUpL + vUpR + vDnL + vDnR) * 0.7;
-  float totalW = 3.0 + 4.0 * 1.5 + 4.0 * 0.7;
-  avgVec /= totalW;
-
-  float avgConf = (center.b * 3.0
-                + (up.b + down.b + right.b + left.b) * 1.5
-                + (upL.b + upR.b + dnL.b + dnR.b) * 0.7) / totalW;
-
-  // Lock noise floor strictly to zero
-  if (length(avgVec) < 0.02) {
-    return vec3(0.0, 0.0, 0.0);
+  if (length(vCenter) < 0.02) {
+    return vec3(0.0);
   }
 
-  // Snap to discrete velocity levels for stair-stepped macroblock edges
   const float VELOCITY_LEVELS = 12.0;
-  vec2 snappedVec = floor(avgVec * VELOCITY_LEVELS + 0.5) / VELOCITY_LEVELS;
-
-  return vec3(snappedVec, avgConf);
+  vec2 snappedVec = floor(vCenter * VELOCITY_LEVELS + 0.5) / VELOCITY_LEVELS;
+  return vec3(snappedVec, center.b);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // FEATURE CONTRAST MASK: Selective Edge Breakthrough
-// High-contrast features (eyes, lips, nostrils, dark edges) punch through the melt;
-// flat textures (skin, walls, hair mass) remain frozen/smeared at 0% camera injection.
+// High-contrast features (eyes, lips, nostrils, dark edges) punch through the melt
 // ═══════════════════════════════════════════════════════════════════════════════
 
 float getEdgeContrast(sampler2D tex, vec2 uv, vec2 texelSize) {
-  // Sample 4-neighbor luminance at +/- 2 texels for robust edge detection
   vec2 offset = texelSize * 2.0;
   float lumCenter = getLuma(texture(tex, uv).rgb);
   float lumRight  = getLuma(texture(tex, clamp(uv + vec2(offset.x, 0.0), vec2(0.001), vec2(0.999))).rgb);
@@ -353,7 +323,6 @@ float getEdgeContrast(sampler2D tex, vec2 uv, vec2 texelSize) {
   float lumUp     = getLuma(texture(tex, clamp(uv + vec2(0.0, offset.y), vec2(0.001), vec2(0.999))).rgb);
   float lumDown   = getLuma(texture(tex, clamp(uv - vec2(0.0, offset.y), vec2(0.001), vec2(0.999))).rgb);
 
-  // Max absolute difference across the 4 neighbors
   float maxDiff = max(
     max(abs(lumCenter - lumRight), abs(lumCenter - lumLeft)),
     max(abs(lumCenter - lumUp), abs(lumCenter - lumDown))
@@ -363,115 +332,149 @@ float getEdgeContrast(sampler2D tex, vec2 uv, vec2 texelSize) {
 }
 
 void main() {
+  // 1. Live camera frame at current UV (with 1.5x saturation boost)
+  vec3 liveCamRGB = boostSaturation(texture(u_curr_frame, v_uv).rgb, 1.5);
+
   // If MOSH AMOUNT == 0, output 100% clean live camera feed (I-frame reset)
   if (u_intensity <= 0.0) {
-    fragColor = texture(u_curr_frame, v_uv);
+    fragColor = vec4(liveCamRGB, 0.0);
     return;
   }
 
   vec2 texelSize = 1.0 / u_resolution;
 
   // ═════════════════════════════════════════════════════════════════════════════
-  // 1. MACROBLOCK GRID & MOTION VECTOR LOOKUP
+  // 1. ORGANIC MACROBLOCK WARPING & DUAL-SCALE SAMPLING
   // ═════════════════════════════════════════════════════════════════════════════
 
-  vec2 blockGrid = max(vec2(4.0), u_resolution / u_macroblock_size);
-  vec2 blockUV = (floor(v_uv * blockGrid) + 0.5) / blockGrid;
+  // Low-frequency motion field lookup at continuous UV
+  vec4 rawMotion = texture(u_motion_texture, v_uv);
+  vec2 blurredMotion = (rawMotion.rg - 0.5) * 2.0;
 
-  // Sample spatially smoothed block motion (9-tap + velocity snapping)
-  vec3 smoothedMotion = getSmoothedBlockMotion(u_motion_texture, blockUV, blockGrid);
-  vec2 blockMotion = smoothedMotion.xy;
-  float motionMag = length(blockMotion);
-  float motionConfidence = smoothedMotion.z;
+  // Warp sampling coordinates organically along moving subject contours
+  vec2 warpedUV = clamp(v_uv + blurredMotion * 0.15, vec2(0.001), vec2(0.999));
+
+  // Scale 1: Primary Macroblocks (16px–24px)
+  vec2 grid1 = max(vec2(4.0), u_resolution / u_macroblock_size);
+  vec2 blockUV1 = (floor(warpedUV * grid1) + 0.5) / grid1;
+  vec3 motion1 = getSingleTapBlockMotion(u_motion_texture, blockUV1);
+
+  // Scale 2: Secondary Macroblocks (10px–14px)
+  float scale2Size = max(8.0, floor(u_macroblock_size * 0.60));
+  vec2 grid2 = max(vec2(4.0), u_resolution / scale2Size);
+  vec2 blockUV2 = (floor(warpedUV * grid2) + 0.5) / grid2;
+  vec3 motion2 = getSingleTapBlockMotion(u_motion_texture, blockUV2);
+
+  // Local luminance contrast determines blending between primary and secondary macroblocks
+  float edgeContrast = getEdgeContrast(u_curr_frame, v_uv, texelSize);
+  float contrastBlend = smoothstep(0.06, 0.24, edgeContrast);
+
+  vec2 organicMotionVector = mix(motion1.xy, motion2.xy, contrastBlend);
+  float motionMag = length(organicMotionVector);
 
   // ═════════════════════════════════════════════════════════════════════════════
-  // 2. INTACT MACROBLOCK TEXTURE ADVECTION (Pure RGB)
-  //    Displace continuous pixel UV by the quantized block motion vector.
-  //    Each macroblock slides as an intact square tile of image texture.
+  // 2. PER-BLOCK MICRO-PARTICLE SCATTER (Strictly On Active Motion)
   // ═════════════════════════════════════════════════════════════════════════════
 
-  const float MAX_UV_TRAVEL = 0.22;
-  vec2 uvDisplacement = blockMotion * (u_displacement_scale * MAX_UV_TRAVEL);
+  vec2 effectiveMotion = organicMotionVector;
+  float handDist = length(warpedUV - u_moshHandPos);
+  float brushRadius = max(0.28, u_moshHandRadius);
+  float nearHand = smoothstep(brushRadius, 0.0, handDist) * u_moshHandActive;
 
-  // Transient beat-driven macroblock jolt when strong kick drum hits
-  if (u_audioTransient > 0.25) {
-    float tJolt = clamp((u_audioTransient - 0.25) / 0.75, 0.0, 1.0);
-    vec2 blockFrac = sign(fract(blockUV * 6.0) - 0.5);
-    uvDisplacement += blockFrac * (texelSize * u_macroblock_size * 0.40 * tJolt);
+  if (motionMag > 0.001) {
+    float microSize = clamp(floor(scale2Size * 0.5), 4.0, 8.0);
+    vec2 microGrid = max(vec2(8.0), u_resolution / microSize);
+    vec2 microCellId = floor(warpedUV * microGrid);
+
+    float cellHash = fract(sin(dot(microCellId, vec2(12.9898, 78.233))) * 43758.5453);
+    float cellHash2 = fract(sin(dot(microCellId + vec2(23.7, 71.9), vec2(26.419, 54.341))) * 28614.7319);
+
+    float speedMultiplier = mix(0.7, 2.2, cellHash);
+    float angleSpread = (cellHash2 - 0.5) * 2.0 * 0.314159; // +/- 18 deg
+    float cosA = cos(angleSpread);
+    float sinA = sin(angleSpread);
+    vec2 spreadMotion = vec2(
+      organicMotionVector.x * cosA - organicMotionVector.y * sinA,
+      organicMotionVector.x * sinA + organicMotionVector.y * cosA
+    );
+
+    float ejectChance = smoothstep(0.06, 0.30, motionMag) * 0.65 + smoothstep(0.05, 0.25, edgeContrast) * 0.35 + nearHand * 0.25;
+    if (cellHash > (1.0 - clamp(ejectChance, 0.15, 0.85))) {
+      effectiveMotion = spreadMotion * speedMultiplier;
+    }
   }
 
-  vec2 sourceUV = clamp(v_uv - uvDisplacement, vec2(0.001), vec2(0.999));
-
-  // Sample historical pixels at displaced UV — pure RGB, no color space conversion
-  vec3 displacedColor = texture(u_prev_feedback, sourceUV).rgb;
-
-  // Boost saturation (+50% / 1.5x) strictly on the incoming camera frame
-  vec3 currentCam = boostSaturation(texture(u_curr_frame, v_uv).rgb, 1.5);
-
   // ═════════════════════════════════════════════════════════════════════════════
-  // 3. PERMANENT PIXEL FREEZE (True I-Frame Starvation)
-  //    When motion is below noise threshold and no kick transient hits,
-  //    output previous feedback buffer. Smeared/melted pixels remain permanently frozen.
+  // 3. MULTIPLICATIVE AUDIO GAIN (0.0 * Audio = 0.0)
   // ═════════════════════════════════════════════════════════════════════════════
 
-  if (motionMag < 0.001 && u_audioTransient <= 0.25) {
-    // Even in frozen state, allow selective edge breakthrough
-    float edgeContrast = getEdgeContrast(u_curr_frame, v_uv, texelSize);
-    float breakthroughMask = smoothstep(u_sub_partition_threshold, u_sub_partition_threshold + 0.15, edgeContrast);
-    float breakthroughBlend = breakthroughMask * u_edge_breakthrough * 0.5; // Gentle in frozen regions
+  float audioGain = 1.0 + (u_audioBass * 2.0) + (u_audioTransient * 3.0);
+  vec2 totalDisplacement = effectiveMotion * (u_displacement_scale * 1.5 * audioGain);
 
-    if (u_decay > 0.0 || u_residual_blend > 0.0) {
-      // Healing mode (MOSH AMOUNT 1-24): gradually restore clean camera feed
-      vec3 healed = mix(displacedColor, currentCam, u_residual_blend + breakthroughBlend);
-      healed = max(vec3(0.0), healed - vec3(u_decay));
-      fragColor = vec4(clamp(healed, 0.0, 1.0), 1.0);
-    } else {
-      // Permanent lock (MOSH AMOUNT 25-100): frozen pixels + subtle edge stamps
-      vec3 frozen = mix(displacedColor, currentCam, breakthroughBlend);
-      fragColor = vec4(clamp(frozen, 0.0, 1.0), 1.0);
-    }
+  // Advect coordinates backward along motion vector
+  vec2 displacedUV = clamp(v_uv - totalDisplacement, vec2(0.001), vec2(0.999));
+  vec4 smearedData = texture(u_prev_feedback, displacedUV);
+
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 4. MOSH CONTAMINATION MASK & LOCALIZED HAND BRUSH (Alpha Channel)
+  //    smearedData.a stores whether a pixel has been displaced/contaminated.
+  //    Uncontaminated pixels (alpha < 0.01) ALWAYS stream live webcam at 60 FPS!
+  // ═════════════════════════════════════════════════════════════════════════════
+
+  float brushDist = length(v_uv - u_moshHandPos);
+  float brushInfluence = smoothstep(brushRadius, brushRadius * 0.25, brushDist);
+  float activeHandSweep = brushInfluence * step(0.1, u_moshHandActive) * smoothstep(0.005, 0.06, motionMag + length(u_moshHandVel));
+
+  float newAlpha = 0.0;
+  if (activeHandSweep > 0.05) {
+    // Ripping fresh blocks from live camera into the mosh stream
+    newAlpha = max(smearedData.a, activeHandSweep);
+  } else if (u_moshHandActive < 0.1) {
+    // Fist closed: LOCK existing sculpted mosh artifacts permanently!
+    newAlpha = smearedData.a;
+  } else {
+    // Hand active elsewhere: carry existing trails forward with slight decay
+    newAlpha = smearedData.a * 0.994;
+  }
+
+  // If no contamination has touched this pixel or its advection source, output LIVE CAMERA!
+  if (newAlpha < 0.01) {
+    fragColor = vec4(liveCamRGB, 0.0);
     return;
   }
 
   // ═════════════════════════════════════════════════════════════════════════════
-  // 4. ACTIVE MOTION: SELECTIVE EDGE BREAKTHROUGH & PURE RGB ADVECTION
-  //    Moving objects act as a brush pushing frozen pixels using strictly original RGB colors.
-  //    High-contrast features punch through; flat regions melt into pure smeared trails.
+  // 5. CONTAMINATED MOSH COMPOSITING OVER LIVE CAMERA
   // ═════════════════════════════════════════════════════════════════════════════
 
-  float edgeContrast = getEdgeContrast(u_curr_frame, v_uv, texelSize);
+  vec3 displacedColor = smearedData.rgb;
 
-  // Smooth threshold: features above u_sub_partition_threshold get breakthrough
-  float breakthroughMask = smoothstep(u_sub_partition_threshold, u_sub_partition_threshold + 0.12, edgeContrast);
-
-  // Scale breakthrough by edge_breakthrough parameter and motion
-  // More motion = slightly less breakthrough to maintain smear coherence
-  float motionDampen = clamp(1.0 - motionMag * 0.5, 0.4, 1.0);
-  float newCamLeak = breakthroughMask * u_edge_breakthrough * motionDampen;
-
-  // Flat regions: near-zero camera leak so they melt into smooth trails
-  // High-contrast: controlled 0.08-0.22 range for feature ghosting
-  newCamLeak = clamp(newCamLeak, 0.0, 0.22);
-
-  // Minimal baseline leak for non-feature motion (invisible brush pushing frozen pixels)
-  float baseLeak = clamp(motionMag * 0.04, 0.0, 0.06) * (1.0 - breakthroughMask);
-  newCamLeak += baseLeak;
-
-  // Blend strictly original advected RGB colors with +50% saturation boosted incoming camera frame
-  vec3 finalColor = mix(displacedColor, currentCam, newCamLeak);
-
-  // ═════════════════════════════════════════════════════════════════════════════
-  // 5. MACROBLOCK TILE BOUNDARY EMPHASIS
-  //    Subtle rectangular tile edges at medium-to-high intensity
-  // ═════════════════════════════════════════════════════════════════════════════
-
-  if (u_intensity > 0.30) {
-    vec2 blockFrac = abs(fract(v_uv * blockGrid) - 0.5) * 2.0;
-    float edgeFactor = step(0.94, max(blockFrac.x, blockFrac.y));
-    finalColor = mix(finalColor, finalColor * 0.88, edgeFactor * motionConfidence * 0.6);
+  // On active motion, mid/highs modulate edge cross-contamination
+  if (motionMag > 0.001 && (u_audioMid > 0.1 || u_audioHigh > 0.1)) {
+    vec2 perpDir = vec2(-effectiveMotion.y, effectiveMotion.x);
+    if (length(perpDir) > 0.0001) {
+      vec2 perpOffset = normalize(perpDir) * texelSize * (u_audioMid * 4.0 + u_audioHigh * 6.0);
+      vec3 smearBlend = texture(u_prev_feedback, clamp(displacedUV + perpOffset, vec2(0.001), vec2(0.999))).rgb;
+      float contamAmount = clamp(u_audioMid * 0.45 + u_audioHigh * 0.55, 0.0, 0.75);
+      displacedColor = mix(displacedColor, smearBlend, contamAmount);
+    }
   }
 
-  fragColor = vec4(clamp(finalColor, 0.0, 1.0), 1.0);
+  // If this pixel was just newly contaminated by the brush (advected alpha was near 0),
+  // initialize it from the live camera so it rips fresh pixels cleanly
+  if (smearedData.a < 0.08) {
+    displacedColor = liveCamRGB;
+  } else {
+    // Edge breakthrough on fast moving edges
+    float breakthroughMask = smoothstep(u_sub_partition_threshold, u_sub_partition_threshold + 0.12, edgeContrast);
+    float camLeak = breakthroughMask * u_edge_breakthrough * 0.18;
+    displacedColor = mix(displacedColor, liveCamRGB, camLeak);
+  }
+
+  // Composite the moshed pixels over the live camera using newAlpha
+  float blendFactor = clamp(newAlpha, 0.0, 1.0);
+  vec3 finalRGB = mix(liveCamRGB, displacedColor, blendFactor);
+  fragColor = vec4(clamp(finalRGB, 0.0, 1.0), blendFactor);
 }
 `
 
@@ -516,6 +519,7 @@ void main() {
   }
 
   vec2 coveredUV = uv * scale + offset;
-  fragColor = texture(u_texture, coveredUV);
+  vec4 texSample = texture(u_texture, coveredUV);
+  fragColor = vec4(texSample.rgb, 1.0);
 }
 `

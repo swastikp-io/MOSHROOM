@@ -166,7 +166,7 @@ export const AudioControl: React.FC<AudioControlProps> = ({
     : null
 
   return (
-    <div className="w-full max-w-4xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 py-2.5 px-4 border border-neutral-800 bg-neutral-950 font-mono text-xs">
+    <div className="w-full flex flex-col gap-3 py-3 px-4 border border-neutral-800 bg-neutral-950 font-mono text-xs">
       {/* Hidden file input supporting audio formats */}
       <input
         ref={fileInputRef}
@@ -177,8 +177,8 @@ export const AudioControl: React.FC<AudioControlProps> = ({
         aria-hidden="true"
       />
 
-      {/* Left side: Label & Track Info */}
-      <div className="flex items-center gap-3">
+      {/* Top Row: Label & Track Info */}
+      <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 select-none">
           <span
             className={`w-1.5 h-1.5 rounded-full ${
@@ -192,26 +192,25 @@ export const AudioControl: React.FC<AudioControlProps> = ({
 
         {truncatedName ? (
           <div
-            className="flex items-center gap-1.5 px-2 py-0.5 border border-neutral-800 bg-black text-neutral-300 tracking-wider truncate max-w-[200px]"
+            className="flex items-center gap-1.5 px-2 py-0.5 border border-neutral-800 bg-black text-neutral-300 tracking-wider truncate max-w-[170px]"
             title={fileName || ''}
           >
             <Music className="w-3 h-3 text-neutral-400 shrink-0" />
             <span className="truncate">{truncatedName}</span>
           </div>
         ) : (
-          <span className="text-[11px] text-neutral-600 hidden sm:inline tracking-wider">
-            STANDALONE / SHADER MODULATION
+          <span className="text-[10px] text-neutral-600 tracking-wider">
+            STANDALONE / SHADER
           </span>
-        )}
-
-        {errorMsg && (
-          <span className="text-[10px] text-red-400 tracking-tight">{errorMsg}</span>
         )}
       </div>
 
-      {/* Right side: Controls & Level Meter */}
-      <div className="flex items-center gap-2 w-full sm:w-auto justify-between sm:justify-end">
-        {/* Upload Audio Button */}
+      {errorMsg && (
+        <span className="text-[10px] text-red-400 tracking-tight">{errorMsg}</span>
+      )}
+
+      {/* Bottom Row: Controls & Level Meter */}
+      <div className="flex items-center justify-between gap-2 pt-1 border-t border-neutral-900">
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
@@ -224,14 +223,14 @@ export const AudioControl: React.FC<AudioControlProps> = ({
         </button>
 
         {fileName && (
-          <>
+          <div className="flex items-center gap-2">
             {/* Play / Pause Toggle */}
             <button
               type="button"
               onClick={handleTogglePlay}
               disabled={disabled}
               title={isPlaying ? 'Pause Audio' : 'Play Audio'}
-              className="flex items-center gap-1.5 px-2.5 py-1 text-xs tracking-wider border border-neutral-700 bg-neutral-900 hover:bg-neutral-800 text-neutral-200 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer select-none"
+              className="flex items-center gap-1 px-2 py-1 text-xs tracking-wider border border-neutral-700 bg-neutral-900 hover:bg-neutral-800 text-neutral-200 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer select-none"
             >
               {isPlaying ? (
                 <>
@@ -269,12 +268,12 @@ export const AudioControl: React.FC<AudioControlProps> = ({
             >
               <canvas
                 ref={meterCanvasRef}
-                width={56}
-                height={22}
+                width={48}
+                height={20}
                 className="block"
               />
             </div>
-          </>
+          </div>
         )}
       </div>
     </div>

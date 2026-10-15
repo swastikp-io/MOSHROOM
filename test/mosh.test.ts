@@ -252,7 +252,7 @@ test('audio-reactive physics: high frequencies punch edgeBreakthrough and lower 
   assert.ok(snareHit.subPartitionThreshold < base.subPartitionThreshold, 'subPartitionThreshold should lower for edge stamp')
 })
 
-test('audio-reactive physics: strong kick transient lowers motionThreshold and sets audioTransient', () => {
+test('audio-reactive physics: strong kick transient preserves strict noise gate threshold so stationary background never twitches', () => {
   const base = computeMoshParameters(50)
   const kick = computeMoshParameters(50, {
     bass: 0.9,
@@ -262,7 +262,63 @@ test('audio-reactive physics: strong kick transient lowers motionThreshold and s
     isPlaying: true,
   })
   assert.equal(kick.audioTransient, 0.85)
-  assert.ok(kick.motionThreshold < base.motionThreshold, 'motionThreshold should be lowered on transient > 0.25')
+  assert.equal(kick.motionThreshold, base.motionThreshold, 'motionThreshold must remain strict during audio to prevent stationary sensor grain twitch')
 })
 
+test('self-advection & momentum decay parameters are calibrated for 20-60 frame velocity propagation', () => {
+  const p25 = computeMoshParameters(25)
+  assert.ok(p25.momentumDecay >= 0.90 && p25.momentumDecay <= 0.93, `Expected momentumDecay >= 0.90, got ${p25.momentumDecay}`)
+  assert.ok(p25.advectionStep >= 1.0)
 
+  const p50 = computeMoshParameters(50)
+  assert.ok(p50.momentumDecay >= 0.92 && p50.momentumDecay <= 0.95, `Expected momentumDecay >= 0.92, got ${p50.momentumDecay}`)
+  assert.ok(p50.advectionStep > p25.advectionStep)
+
+  const p100 = computeMoshParameters(100)
+  assert.ok(p100.momentumDecay >= 0.96 && p100.momentumDecay <= 0.98, `Expected momentumDecay ~0.97, got ${p100.momentumDecay}`)
+  assert.ok(p100.advectionStep >= 2.0)
+})
+
+test('shaders include organic macroblock warping, multiplicative audio displacement, and audio uniforms', () => {
+  assert.ok(MOTION_ESTIMATION_FRAGMENT_SHADER.includes('u_momentum_decay'))
+  assert.ok(MOTION_ESTIMATION_FRAGMENT_SHADER.includes('u_advection_step'))
+  assert.ok(MOTION_ESTIMATION_FRAGMENT_SHADER.includes('u_audioBass'))
+  assert.ok(MOTION_ESTIMATION_FRAGMENT_SHADER.includes('advectUV'))
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('u_audioBass'))
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('u_audioMid'))
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('u_audioHigh'))
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('warpedUV'))
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('audioGain'))
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('organicMotionVector'))
+})
+
+test('shaders include hand-tracking uniforms and gesture gating for datamosh brush and freeze/lock', () => {
+  // Motion Estimation Fragment Shader
+  assert.ok(MOTION_ESTIMATION_FRAGMENT_SHADER.includes('u_moshHandActive'))
+  assert.ok(MOTION_ESTIMATION_FRAGMENT_SHADER.includes('u_moshHandPos'))
+  assert.ok(MOTION_ESTIMATION_FRAGMENT_SHADER.includes('u_moshHandVel'))
+  assert.ok(MOTION_ESTIMATION_FRAGMENT_SHADER.includes('u_moshHandRadius'))
+  assert.ok(MOTION_ESTIMATION_FRAGMENT_SHADER.includes('handInfluence'))
+
+  // Datamosh Fragment Shader
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('u_moshHandActive'))
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('u_moshHandPos'))
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('u_moshHandVel'))
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('u_moshHandRadius'))
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('nearHand'))
+})
+
+test('particleDisplacement slider controls displacement scale along smooth exponential curve', () => {
+  const pZero = computeMoshParameters(60, null, 0)
+  assert.equal(pZero.displacementScale, 0, 'Displacement must be 0 when particleDisplacement = 0')
+
+  const pTight = computeMoshParameters(60, null, 10)
+  const pDefault = computeMoshParameters(60, null, 25)
+  const pHigh = computeMoshParameters(60, null, 50)
+  const pMax = computeMoshParameters(60, null, 100)
+
+  assert.ok(pTight.displacementScale < pDefault.displacementScale * 0.35, 'Low particle displacement must stay tight')
+  assert.ok(pHigh.displacementScale > pDefault.displacementScale * 2.5, '50 displacement should be ~3x default')
+  assert.ok(pMax.displacementScale > pDefault.displacementScale * 7.0, '100 displacement should be >= 7x default')
+  assert.ok(pMax.displacementScale <= 1.0)
+})
