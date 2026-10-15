@@ -192,59 +192,6 @@ export function App() {
             disabled={false}
           />
 
-          {/* Gesture Controls Guide */}
-          <div className="border border-neutral-800 bg-neutral-950 p-3.5 text-xs flex flex-col gap-2.5">
-            <div className="flex items-center justify-between border-b border-neutral-900 pb-2">
-              <span className="text-neutral-300 font-medium tracking-wider uppercase text-[11px]">
-                GESTURE CONTROLS
-              </span>
-              <span className="text-[10px] text-neutral-600 uppercase">
-                MEDIAPIPE
-              </span>
-            </div>
-
-            <div className="flex flex-col gap-2 text-[11px]">
-              <div className="flex flex-col gap-1">
-                <span className="text-neutral-400 font-medium tracking-wider text-[10px] uppercase">
-                  RIGHT HAND — MOSH BRUSH
-                </span>
-                <div className="grid grid-cols-2 gap-1.5 text-neutral-400">
-                  <div className="bg-neutral-900/60 px-2 py-1 border border-neutral-800/80">
-                    <span className="text-white font-medium">OPEN:</span> Mosh Brush
-                  </div>
-                  <div className="bg-neutral-900/60 px-2 py-1 border border-neutral-800/80">
-                    <span className="text-white font-medium">FIST:</span> Lock Canvas
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-1">
-                <span className="text-neutral-400 font-medium tracking-wider text-[10px] uppercase">
-                  LEFT HAND — AUDIO REACTIVITY
-                </span>
-                <div className="grid grid-cols-2 gap-1.5 text-neutral-400">
-                  <div className="bg-neutral-900/60 px-2 py-1 border border-neutral-800/80">
-                    <span className="text-white font-medium">OPEN:</span> Play Audio
-                  </div>
-                  <div className="bg-neutral-900/60 px-2 py-1 border border-neutral-800/80">
-                    <span className="text-white font-medium">FIST:</span> Pause Audio
-                  </div>
-                </div>
-                <div className="text-[10px] text-neutral-500 mt-0.5">
-                  Raise hand higher to intensify audio reactivity & mosh bloom.
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-1 border-t border-neutral-900 pt-1.5">
-                <span className="text-neutral-400 font-medium tracking-wider text-[10px] uppercase">
-                  DUAL-HAND GESTURE
-                </span>
-                <div className="bg-neutral-900/60 px-2 py-1 border border-neutral-800/80 text-neutral-300">
-                  <span className="text-white font-medium">DOUBLE FIST:</span> Clean I-Frame Reset
-                </div>
-              </div>
-            </div>
-          </div>
         </div>
       </main>
 
