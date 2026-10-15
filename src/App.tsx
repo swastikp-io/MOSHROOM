@@ -3,7 +3,9 @@ import { useCamera } from './hooks/useCamera.ts'
 import { CameraPreview } from './components/CameraPreview.tsx'
 import { MoshControl, type MoshControlHandle } from './components/MoshControl.tsx'
 import { AudioControl } from './components/AudioControl.tsx'
+import { VideoOverlayControl } from './components/VideoOverlayControl.tsx'
 import { AudioAnalyzer } from './lib/audio/AudioAnalyzer.ts'
+import { getBlendModeGlIndex, type BlendModeId } from './lib/datamosh/blendModes.ts'
 
 export function App() {
   const [particleDisplacement, setParticleDisplacement] = useState<number>(25)
@@ -11,6 +13,14 @@ export function App() {
   const { status, error, videoRef, startCamera, stopCamera } = useCamera()
 
   const moshControlRef = useRef<MoshControlHandle | null>(null)
+  const overlayVideoRef = useRef<HTMLVideoElement | null>(null)
+
+  // Video Overlay State
+  const [overlayFileName, setOverlayFileName] = useState<string | null>(null)
+  const [isOverlayPlaying, setIsOverlayPlaying] = useState<boolean>(false)
+  const [isOverlayLooping, setIsOverlayLooping] = useState<boolean>(true)
+  const [overlayBlendMode, setOverlayBlendMode] = useState<BlendModeId>('screen')
+  const [overlayOpacity, setOverlayOpacity] = useState<number>(0.85)
 
   const [audioAnalyzer] = useState<AudioAnalyzer | null>(() => {
     if (typeof window !== 'undefined') {
@@ -25,6 +35,30 @@ export function App() {
     }
   }, [audioAnalyzer])
 
+  // Synchronize overlay video element playback events
+  useEffect(() => {
+    const vid = overlayVideoRef.current
+    if (!vid) return
+
+    const handlePlay = () => setIsOverlayPlaying(true)
+    const handlePause = () => setIsOverlayPlaying(false)
+    const handleEnded = () => {
+      if (!vid.loop) {
+        setIsOverlayPlaying(false)
+      }
+    }
+
+    vid.addEventListener('play', handlePlay)
+    vid.addEventListener('pause', handlePause)
+    vid.addEventListener('ended', handleEnded)
+
+    return () => {
+      vid.removeEventListener('play', handlePlay)
+      vid.removeEventListener('pause', handlePause)
+      vid.removeEventListener('ended', handleEnded)
+    }
+  }, [])
+
   const handleRestore = () => {
     setRestoreCount((prev) => prev + 1)
   }
@@ -32,6 +66,59 @@ export function App() {
   // Pure imperative update to MoshControl DOM ref — zero React re-render of App tree during 60 FPS loop!
   const handleMoshIntensityUpdate = useCallback((intensity: number) => {
     moshControlRef.current?.updateIntensity(intensity)
+  }, [])
+
+  // Video Overlay Handlers
+  const handleOverlayFileSelect = useCallback((file: File) => {
+    const vid = overlayVideoRef.current
+    if (!vid) return
+
+    const objectUrl = URL.createObjectURL(file)
+    vid.src = objectUrl
+    vid.loop = isOverlayLooping
+    vid.muted = true
+    vid.playsInline = true
+    vid.play().then(() => {
+      setIsOverlayPlaying(true)
+    }).catch(() => {
+      setIsOverlayPlaying(false)
+    })
+
+    setOverlayFileName(file.name)
+  }, [isOverlayLooping])
+
+  const handleToggleOverlayPlay = useCallback(() => {
+    const vid = overlayVideoRef.current
+    if (!vid || !vid.src) return
+
+    if (vid.paused) {
+      vid.play().then(() => setIsOverlayPlaying(true)).catch(() => {})
+    } else {
+      vid.pause()
+      setIsOverlayPlaying(false)
+    }
+  }, [])
+
+  const handleToggleOverlayLoop = useCallback(() => {
+    const next = !isOverlayLooping
+    setIsOverlayLooping(next)
+    if (overlayVideoRef.current) {
+      overlayVideoRef.current.loop = next
+    }
+  }, [isOverlayLooping])
+
+  const handleClearOverlay = useCallback(() => {
+    const vid = overlayVideoRef.current
+    if (vid) {
+      vid.pause()
+      if (vid.src) {
+        URL.revokeObjectURL(vid.src)
+      }
+      vid.removeAttribute('src')
+      vid.load()
+    }
+    setOverlayFileName(null)
+    setIsOverlayPlaying(false)
   }, [])
 
   return (
@@ -66,6 +153,9 @@ export function App() {
             onMoshIntensityUpdate={handleMoshIntensityUpdate}
             restoreTrigger={restoreCount}
             audioAnalyzer={audioAnalyzer}
+            overlayVideoRef={overlayVideoRef}
+            overlayBlendMode={getBlendModeGlIndex(overlayBlendMode)}
+            overlayOpacity={overlayOpacity}
           />
         </div>
 
@@ -78,6 +168,22 @@ export function App() {
             onChange={setParticleDisplacement}
             onRestore={handleRestore}
             disabled={status !== 'active'}
+          />
+
+          {/* Video Overlay Control with Photoshop Blend Modes */}
+          <VideoOverlayControl
+            fileName={overlayFileName}
+            isPlaying={isOverlayPlaying}
+            isLooping={isOverlayLooping}
+            blendMode={overlayBlendMode}
+            opacity={overlayOpacity}
+            onFileSelect={handleOverlayFileSelect}
+            onTogglePlay={handleToggleOverlayPlay}
+            onToggleLoop={handleToggleOverlayLoop}
+            onBlendModeChange={setOverlayBlendMode}
+            onOpacityChange={setOverlayOpacity}
+            onClear={handleClearOverlay}
+            disabled={false}
           />
 
           {/* Monochromatic Audio-Reactive Engine Control Strip */}
@@ -145,7 +251,7 @@ export function App() {
       {/* Footer */}
       <footer className="w-full max-w-7xl mx-auto flex items-center justify-between pt-4 border-t border-neutral-900 text-[10px] tracking-wider text-neutral-600 select-none">
         <div>MOSHROOM ENGINE v0.4.0 — BRUTALIST EDITION</div>
-        <div>WEBGL2 / FFT AUDIO / MEDIAPIPE GESTURE</div>
+        <div>WEBGL2 / FFT AUDIO / MEDIAPIPE GESTURE / VIDEO OVERLAY</div>
       </footer>
     </div>
   )

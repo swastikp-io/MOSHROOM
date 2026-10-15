@@ -22,6 +22,7 @@
   - *Micro-Particles* (4px–8px) break off on rapid motion with hash-driven speed variation (0.7× to 2.2×) and angular spread ($\pm 18^\circ$).
 - **Pure-RGB Color Space & Incoming Saturation Boost**: Saturated live camera input (+50% saturation boost) without recursive feedback color corruption or synthetic chroma tinting.
 - **Selective Alpha-Channel Contamination Mask**: Unbrushed regions continue streaming clean 60 FPS live video, while brushed zones freeze and deform into persistent datamosh artifacts.
+- **Looping Video Overlay with 27 Photoshop Blend Modes**: Upload external video files (`.mp4`, `.webm`, `.mov`) that loop continuously on top of the live deformation feed, with GPU-accelerated compositing across 6 categories: Normal, Darken, Lighten, Contrast, Comparative, and Composite (HSL) modes, complete with 0–100% opacity control.
 - **AI Hand Tracking & Gesture Control**: Built with MediaPipe Tasks Vision (`HandLandmarker`), enabling contact-free performance control.
 - **Real-Time FFT Audio-Reactivity**: Multi-band frequency analysis (Bass, Mid, High) and transient kick detection that dynamically surge displacement scale, trigger particle ejections, and boost temporal momentum.
 - **Zero-Allocation 60 FPS Render Loop**: DOM refs, canvas 2D meters, and direct WebGL uniforms eliminate React re-renders during active tracking and rendering.
@@ -73,6 +74,21 @@ MOSHROOM includes a built-in Web Audio API analyzer (`AudioAnalyzer`) that modul
 
 ---
 
+## Video Overlay & Blend Modes
+
+Users can add an external video file (`.mp4`, `.webm`, `.mov`, `.m4v`, `.mkv`) that layers directly on top of the live deformation canvas. The overlay plays in a seamless loop (or with manual playback/loop toggles) and features GPU-accelerated compositing with an opacity slider (0–100%) and all 27 standard Photoshop blend modes:
+
+| Category | Blend Modes | Description / Formula |
+|:---|:---|:---|
+| **Normal** | `Normal`, `Dissolve` | Standard overlay or dithered opacity hash |
+| **Darken** | `Darken`, `Multiply`, `Color Burn`, `Linear Burn`, `Darker Color` | Retains darker luminance tones, darkening base pixel data |
+| **Lighten** | `Lighten`, `Screen`, `Color Dodge`, `Linear Dodge (Add)`, `Lighter Color` | Drops blacks, amplifying brightness and luminous trails |
+| **Contrast** | `Overlay`, `Soft Light`, `Hard Light`, `Vivid Light`, `Linear Light`, `Pin Light`, `Hard Mix` | Increases dynamic range; highlights lighten and shadows darken |
+| **Comparative** | `Difference`, `Exclusion`, `Subtract`, `Divide` | Inverts and subtracts color channels to reveal motion deltas |
+| **Composite** | `Hue`, `Saturation`, `Color`, `Luminosity` | Combines HSL color attributes between camera and video |
+
+---
+
 ## GPU Pipeline Architecture
 
 The rendering pipeline executes in WebGL2 across three primary passes using a single-triangle fullscreen quad (`gl_VertexID`):
@@ -81,6 +97,7 @@ The rendering pipeline executes in WebGL2 across three primary passes using a si
 flowchart TD
     Cam[Webcam Feed 720p @ 30 FPS] -->|TexSubImage2D| CurrCam[texCurrCamera]
     PrevCam[texPrevCamera]
+    OverlayVid[Overlay Video in Loop] -->|TexSubImage2D| OverlayTex[texOverlay]
     
     subgraph Pass1["Pass 1: Motion Estimation (Coarse Grid FBO: W/16 x H/16)"]
         CurrCam & PrevCam --> SAD[9-Point SAD Diamond Search]
@@ -101,9 +118,10 @@ flowchart TD
         ContamMask --> FeedbackFBO[texFeedback Write RGBA8]
     end
 
-    subgraph Pass3["Pass 3: Display Pass (Screen Canvas)"]
+    subgraph Pass3["Pass 3: Display & Overlay Compositing (Screen Canvas)"]
         FeedbackFBO --> CoverAspect[Aspect-Ratio Cover Fit]
-        CoverAspect --> MirrorFlip[Horizontal Mirror & Vertical Flip]
+        OverlayTex --> BlendModes[27 Photoshop Blend Modes + Opacity]
+        CoverAspect & BlendModes --> MirrorFlip[Horizontal Mirror & Vertical Flip]
         MirrorFlip --> ScreenCanvas[Canvas Output 60 FPS]
     end
 
@@ -128,6 +146,7 @@ flowchart TD
    - Composites displaced pixels over live camera using the alpha contamination mask.
 4. **`DISPLAY_FRAGMENT_SHADER`**:
    - Hardware aspect-ratio compensation (`object-fit: cover`) preventing distortion.
+   - Composites the looping video overlay using the chosen blend mode and opacity.
    - Real-time horizontal selfie mirror and vertical inversion toggles.
 
 ---
@@ -210,15 +229,17 @@ MOSHROOM/
 ├── src/
 │   ├── assets/             # Brand logos & preview graphics
 │   ├── components/         # High-performance React UI components
-│   │   ├── AudioControl.tsx   # Audio upload, playback, loop & 2D FFT level meter
-│   │   ├── CameraPreview.tsx  # WebGL canvas viewport, gesture HUD & DOM reticles
-│   │   └── MoshControl.tsx    # Particle displacement slider & live intensity meter
+│   │   ├── AudioControl.tsx       # Audio upload, playback, loop & 2D FFT level meter
+│   │   ├── CameraPreview.tsx      # WebGL canvas viewport, gesture HUD & DOM reticles
+│   │   ├── MoshControl.tsx        # Particle displacement slider & live intensity meter
+│   │   └── VideoOverlayControl.tsx # Video overlay upload, loop, opacity & blend modes
 │   ├── hooks/
-│   │   └── useCamera.ts       # Camera lifecycle, permissions, and stream constraints
+│   │   └── useCamera.ts           # Camera lifecycle, permissions, and stream constraints
 │   ├── lib/
 │   │   ├── audio/
 │   │   │   └── AudioAnalyzer.ts   # Web Audio FFT analysis & transient onset detection
 │   │   ├── datamosh/
+│   │   │   ├── blendModes.ts       # 27 Photoshop blend mode definitions & categories
 │   │   │   ├── DatamoshRenderer.ts # WebGL2 multi-pass orchestration & ping-pong FBOs
 │   │   │   ├── parameters.ts       # Non-linear parameter derivation & audio modulation
 │   │   │   └── shaders.ts          # GLSL ES 3.00 shader programs (Motion, Mosh, Display)

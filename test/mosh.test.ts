@@ -8,6 +8,12 @@ import {
   DATAMOSH_FRAGMENT_SHADER,
   DISPLAY_FRAGMENT_SHADER,
 } from '../src/lib/datamosh/shaders.ts'
+import {
+  BLEND_MODE_CATEGORIES,
+  BLEND_MODE_MAP,
+  getBlendModeGlIndex,
+  type BlendModeId,
+} from '../src/lib/datamosh/blendModes.ts'
 
 test('computeMoshParameters at 0 bypasses effects cleanly (I-frame reset)', () => {
   const p0 = computeMoshParameters(0)
@@ -322,3 +328,58 @@ test('particleDisplacement slider controls displacement scale along smooth expon
   assert.ok(pMax.displacementScale > pDefault.displacementScale * 7.0, '100 displacement should be >= 7x default')
   assert.ok(pMax.displacementScale <= 1.0)
 })
+
+test('video overlay blend modes: all 27 Photoshop modes are categorized without duplicates or gaps', () => {
+  assert.equal(BLEND_MODE_CATEGORIES.length, 6)
+
+  const expectedCategories = [
+    'Normal modes',
+    'Darken modes',
+    'Lighten modes',
+    'Contrast modes',
+    'Comparative modes',
+    'Composite modes',
+  ]
+  const actualCategories = BLEND_MODE_CATEGORIES.map((c) => c.category)
+  assert.deepEqual(actualCategories, expectedCategories)
+
+  const allModes = BLEND_MODE_CATEGORIES.flatMap((c) => c.modes)
+  assert.equal(allModes.length, 27)
+
+  // Verify glIndex 0 to 26 strictly sequential without gaps or duplicates
+  const glIndices = allModes.map((m) => m.glIndex)
+  for (let i = 0; i < 27; i++) {
+    assert.equal(glIndices[i], i, `Expected index ${i} at position ${i}`)
+  }
+
+  // Verify map and helper
+  assert.equal(BLEND_MODE_MAP['screen'], 8)
+  assert.equal(getBlendModeGlIndex('normal'), 0)
+  assert.equal(getBlendModeGlIndex('dissolve'), 1)
+  assert.equal(getBlendModeGlIndex('multiply'), 3)
+  assert.equal(getBlendModeGlIndex('screen'), 8)
+  assert.equal(getBlendModeGlIndex('overlay'), 12)
+  assert.equal(getBlendModeGlIndex('difference'), 19)
+  assert.equal(getBlendModeGlIndex('luminosity'), 26)
+
+  // Fallback test
+  assert.equal(getBlendModeGlIndex('unknown' as unknown as BlendModeId), 0)
+})
+
+test('DISPLAY_FRAGMENT_SHADER includes video overlay uniforms and 27 blend mode shader branches', () => {
+  assert.ok(DISPLAY_FRAGMENT_SHADER.includes('u_overlay_texture'))
+  assert.ok(DISPLAY_FRAGMENT_SHADER.includes('u_overlay_active'))
+  assert.ok(DISPLAY_FRAGMENT_SHADER.includes('u_overlay_opacity'))
+  assert.ok(DISPLAY_FRAGMENT_SHADER.includes('u_overlay_blend_mode'))
+  assert.ok(DISPLAY_FRAGMENT_SHADER.includes('u_overlay_aspect'))
+  assert.ok(DISPLAY_FRAGMENT_SHADER.includes('applyBlendMode'))
+
+  // Verify all 27 mode branches (mode == 0 through mode == 26) exist in GLSL
+  for (let i = 0; i <= 26; i++) {
+    assert.ok(
+      DISPLAY_FRAGMENT_SHADER.includes(`mode == ${i}`),
+      `DISPLAY_FRAGMENT_SHADER missing branch for blend mode ${i}`,
+    )
+  }
+})
+
