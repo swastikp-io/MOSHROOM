@@ -211,11 +211,34 @@ npm run preview
 
 ### Testing & Quality
 ```bash
-# Run unit test suite (20 tests covering parameters, GLSL shaders, audio physics)
+# Run unit test suite (22 tests covering parameters, GLSL shaders, audio physics)
 npm test
 
 # Run Oxlint
 npm run lint
+```
+
+### Deploy to Vercel
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new)
+
+#### Option 1: Automatic Git Integration (Recommended)
+1. Push your repository to GitHub.
+2. Go to [vercel.com/new](https://vercel.com/new) and import the repository.
+3. Vercel automatically detects **Vite** and uses:
+   - **Framework Preset**: `Vite`
+   - **Build Command**: `npm run build` (or `tsc -b && vite build`)
+   - **Output Directory**: `dist`
+   - **Install Command**: `npm install`
+4. Click **Deploy**.
+
+#### Option 2: Vercel CLI
+```bash
+# Install Vercel CLI or run directly with npx
+npx vercel
+
+# Deploy directly to production
+npx vercel --prod
 ```
 
 ---
