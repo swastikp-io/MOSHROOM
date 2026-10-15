@@ -12,6 +12,7 @@ export interface RendererOptions {
   canvas: HTMLCanvasElement
   video: HTMLVideoElement
   audioAnalyzer?: AudioAnalyzer | null
+  overlayVideo?: HTMLVideoElement | null
   onFpsUpdate?: (fps: number) => void
   onMoshIntensityUpdate?: (intensityPercent: number) => void
   onError?: (error: Error) => void
@@ -28,6 +29,15 @@ export class DatamoshRenderer {
   private audioAnalyzer: AudioAnalyzer | null = null
   private onFpsUpdate?: (fps: number) => void
   private onError?: (error: Error) => void
+
+  // Video Overlay
+  private overlayVideo: HTMLVideoElement | null = null
+  private texOverlay: WebGLTexture | null = null
+  private overlayWidth = 0
+  private overlayHeight = 0
+  private overlayBlendMode = 0
+  private overlayOpacity = 0.85
+  private lastOverlayVideoTime = -1
 
   // Shader Programs
   private progCopy: WebGLProgram | null = null
@@ -108,6 +118,7 @@ export class DatamoshRenderer {
     this.canvas = options.canvas
     this.video = options.video
     this.audioAnalyzer = options.audioAnalyzer || null
+    this.overlayVideo = options.overlayVideo || null
     this.onFpsUpdate = options.onFpsUpdate
     this.onMoshIntensityUpdate = options.onMoshIntensityUpdate
     this.onError = options.onError
@@ -252,6 +263,11 @@ export class DatamoshRenderer {
       u_video_aspect: gl.getUniformLocation(this.progDisplay, 'u_video_aspect'),
       u_flip_y: gl.getUniformLocation(this.progDisplay, 'u_flip_y'),
       u_flip_x: gl.getUniformLocation(this.progDisplay, 'u_flip_x'),
+      u_overlay_texture: gl.getUniformLocation(this.progDisplay, 'u_overlay_texture'),
+      u_overlay_active: gl.getUniformLocation(this.progDisplay, 'u_overlay_active'),
+      u_overlay_opacity: gl.getUniformLocation(this.progDisplay, 'u_overlay_opacity'),
+      u_overlay_blend_mode: gl.getUniformLocation(this.progDisplay, 'u_overlay_blend_mode'),
+      u_overlay_aspect: gl.getUniformLocation(this.progDisplay, 'u_overlay_aspect'),
     }
   }
 
@@ -358,6 +374,14 @@ export class DatamoshRenderer {
     this.fboMotion.forEach((fbo) => fbo && gl.deleteFramebuffer(fbo))
     this.texFeedback.forEach((tex) => tex && gl.deleteTexture(tex))
     this.fboFeedback.forEach((fbo) => fbo && gl.deleteFramebuffer(fbo))
+
+    if (this.texOverlay) {
+      gl.deleteTexture(this.texOverlay)
+      this.texOverlay = null
+      this.overlayWidth = 0
+      this.overlayHeight = 0
+      this.lastOverlayVideoTime = -1
+    }
 
     this.texCurrCamera = null
     this.texPrevCamera = null
@@ -713,6 +737,53 @@ export class DatamoshRenderer {
     gl.bindTexture(gl.TEXTURE_2D, sourceTexture)
     gl.uniform1i(this.uniformsDisplay.u_texture, 0)
 
+    let overlayActive = 0
+    let overlayAspect = 1.0
+
+    if (
+      this.overlayVideo &&
+      this.overlayVideo.readyState >= 2 &&
+      this.overlayVideo.videoWidth > 0 &&
+      this.overlayVideo.videoHeight > 0
+    ) {
+      const oW = this.overlayVideo.videoWidth
+      const oH = this.overlayVideo.videoHeight
+      overlayAspect = oW / oH
+
+      if (!this.texOverlay || this.overlayWidth !== oW || this.overlayHeight !== oH) {
+        if (this.texOverlay) {
+          gl.deleteTexture(this.texOverlay)
+        }
+        this.texOverlay = this.createTexture(oW, oH, gl.LINEAR, gl.LINEAR)
+        this.overlayWidth = oW
+        this.overlayHeight = oH
+        this.lastOverlayVideoTime = -1
+      }
+
+      gl.activeTexture(gl.TEXTURE1)
+      gl.bindTexture(gl.TEXTURE_2D, this.texOverlay)
+
+      if (this.overlayVideo.currentTime !== this.lastOverlayVideoTime) {
+        this.lastOverlayVideoTime = this.overlayVideo.currentTime
+        gl.texSubImage2D(
+          gl.TEXTURE_2D,
+          0,
+          0,
+          0,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          this.overlayVideo,
+        )
+      }
+
+      overlayActive = 1
+    } else {
+      gl.activeTexture(gl.TEXTURE1)
+      if (this.texOverlay) {
+        gl.bindTexture(gl.TEXTURE_2D, this.texOverlay)
+      }
+    }
+
     const canvasAspect = this.canvas.width / Math.max(1, this.canvas.height)
     const videoAspect = this.videoWidth / Math.max(1, this.videoHeight)
 
@@ -720,6 +791,12 @@ export class DatamoshRenderer {
     gl.uniform1f(this.uniformsDisplay.u_video_aspect, videoAspect)
     gl.uniform1f(this.uniformsDisplay.u_flip_y, this.flipY ? 1.0 : 0.0)
     gl.uniform1f(this.uniformsDisplay.u_flip_x, this.flipX ? 1.0 : 0.0)
+
+    gl.uniform1i(this.uniformsDisplay.u_overlay_texture, 1)
+    gl.uniform1i(this.uniformsDisplay.u_overlay_active, overlayActive)
+    gl.uniform1f(this.uniformsDisplay.u_overlay_opacity, this.overlayOpacity)
+    gl.uniform1i(this.uniformsDisplay.u_overlay_blend_mode, this.overlayBlendMode)
+    gl.uniform1f(this.uniformsDisplay.u_overlay_aspect, overlayAspect)
 
     gl.drawArrays(gl.TRIANGLES, 0, 3)
   }
@@ -770,6 +847,33 @@ export class DatamoshRenderer {
 
   public getAudioReactivityGain(): number {
     return this.audioReactivityGain
+  }
+
+  public setOverlayVideo(video: HTMLVideoElement | null): void {
+    this.overlayVideo = video
+    this.lastOverlayVideoTime = -1
+    if (!video && this.gl && this.texOverlay) {
+      this.gl.deleteTexture(this.texOverlay)
+      this.texOverlay = null
+      this.overlayWidth = 0
+      this.overlayHeight = 0
+    }
+  }
+
+  public setOverlayBlendMode(mode: number): void {
+    this.overlayBlendMode = mode
+  }
+
+  public setOverlayOpacity(opacity: number): void {
+    this.overlayOpacity = Math.max(0.0, Math.min(1.0, opacity))
+  }
+
+  public getOverlayBlendMode(): number {
+    return this.overlayBlendMode
+  }
+
+  public getOverlayOpacity(): number {
+    return this.overlayOpacity
   }
 
   public resetFeedback(): void {
@@ -884,6 +988,12 @@ export class DatamoshRenderer {
     this.canvas.removeEventListener('webglcontextrestored', this.onContextRestored)
 
     this.deleteBuffers()
+
+    if (this.texOverlay && this.gl) {
+      this.gl.deleteTexture(this.texOverlay)
+      this.texOverlay = null
+    }
+    this.overlayVideo = null
 
     const gl = this.gl
     if (gl) {

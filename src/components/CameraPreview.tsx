@@ -14,6 +14,9 @@ interface CameraPreviewProps {
   particleDisplacement?: number
   restoreTrigger?: number
   audioAnalyzer?: AudioAnalyzer | null
+  overlayVideoRef?: React.RefObject<HTMLVideoElement | null>
+  overlayBlendMode?: number
+  overlayOpacity?: number
   onFpsUpdate?: (fps: number) => void
   onMoshIntensityUpdate?: (intensity: number) => void
 }
@@ -27,6 +30,9 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
   particleDisplacement = 25,
   restoreTrigger,
   audioAnalyzer,
+  overlayVideoRef,
+  overlayBlendMode,
+  overlayOpacity,
   onFpsUpdate,
   onMoshIntensityUpdate,
 }) => {
@@ -66,6 +72,7 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
           canvas,
           video,
           audioAnalyzer,
+          overlayVideo: overlayVideoRef?.current || null,
           onFpsUpdate: (currentFps) => {
             if (fpsTextRef.current) {
               fpsTextRef.current.textContent = `${currentFps} FPS`
@@ -84,7 +91,6 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
         })
         rendererRef.current = renderer
         renderer.resizeCanvas()
-        renderer.setParticleDisplacement(particleDisplacement)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         queueMicrotask(() => setWebglError(msg))
@@ -103,12 +109,31 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
       window.removeEventListener('resize', handleResize)
       resizeObserver.disconnect()
     }
-  }, [videoRef, onFpsUpdate, onMoshIntensityUpdate, audioAnalyzer])
+  }, [videoRef, onFpsUpdate, onMoshIntensityUpdate, audioAnalyzer, overlayVideoRef])
 
   // Synchronize audio analyzer reference without resetting WebGL
   useEffect(() => {
     rendererRef.current?.setAudioAnalyzer(audioAnalyzer || null)
   }, [audioAnalyzer])
+
+  // Synchronize overlay video element reference
+  useEffect(() => {
+    rendererRef.current?.setOverlayVideo(overlayVideoRef?.current || null)
+  }, [overlayVideoRef])
+
+  // Synchronize overlay blend mode
+  useEffect(() => {
+    if (overlayBlendMode !== undefined) {
+      rendererRef.current?.setOverlayBlendMode(overlayBlendMode)
+    }
+  }, [overlayBlendMode])
+
+  // Synchronize overlay opacity
+  useEffect(() => {
+    if (overlayOpacity !== undefined) {
+      rendererRef.current?.setOverlayOpacity(overlayOpacity)
+    }
+  }, [overlayOpacity])
 
   // Update particle displacement immediately without restarting renderer
   useEffect(() => {
@@ -348,6 +373,17 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
         muted
         className="hidden"
       />
+
+      {/* Off-screen video overlay element */}
+      {overlayVideoRef && (
+        <video
+          ref={overlayVideoRef}
+          playsInline
+          muted
+          loop
+          className="hidden"
+        />
+      )}
 
       {/* Primary Hardware-Accelerated WebGL2 Canvas */}
       <canvas

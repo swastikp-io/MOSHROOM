@@ -479,9 +479,10 @@ void main() {
 `
 
 /**
- * Display Fragment Shader
+ * Display Fragment Shader with Multi-Mode Video Overlay Compositing
  * Renders the processed result to the canvas default framebuffer
- * with GPU object-fit: cover behavior preserving camera aspect ratio.
+ * with GPU object-fit: cover behavior preserving camera aspect ratio,
+ * and composites an optional looping video overlay with 27 Photoshop blend modes.
  */
 export const DISPLAY_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
@@ -494,7 +495,227 @@ uniform float u_video_aspect;
 uniform float u_flip_y;
 uniform float u_flip_x;
 
+// Video Overlay Uniforms
+uniform sampler2D u_overlay_texture;
+uniform int u_overlay_active;
+uniform float u_overlay_opacity;
+uniform int u_overlay_blend_mode;
+uniform float u_overlay_aspect;
+
 out vec4 fragColor;
+
+float getPerceptualLuma(vec3 c) {
+  return dot(c, vec3(0.299, 0.587, 0.114));
+}
+
+float softLightChannel(float b, float s) {
+  if (s <= 0.5) {
+    return b - (1.0 - 2.0 * s) * b * (1.0 - b);
+  } else {
+    float d = (b <= 0.25) ? ((16.0 * b - 12.0) * b + 4.0) * b : sqrt(b);
+    return b + (2.0 * s - 1.0) * (d - b);
+  }
+}
+
+float vividLightChannel(float b, float s) {
+  if (s <= 0.5) {
+    return (s <= 0.0) ? 0.0 : max(1.0 - (1.0 - b) / (2.0 * s), 0.0);
+  } else {
+    return (s >= 1.0) ? 1.0 : min(b / (2.0 * (1.0 - s)), 1.0);
+  }
+}
+
+float pinLightChannel(float b, float s) {
+  return (s <= 0.5) ? min(b, 2.0 * s) : max(b, 2.0 * (s - 0.5));
+}
+
+vec3 rgb2hsl(vec3 c) {
+  float cMin = min(min(c.r, c.g), c.b);
+  float cMax = max(max(c.r, c.g), c.b);
+  float delta = cMax - cMin;
+  float h = 0.0;
+  float s = 0.0;
+  float l = (cMax + cMin) * 0.5;
+  if (delta > 0.00001) {
+    s = (l < 0.5) ? (delta / (cMax + cMin)) : (delta / (2.0 - cMax - cMin));
+    if (c.r >= cMax) {
+      h = (c.g - c.b) / delta + (c.g < c.b ? 6.0 : 0.0);
+    } else if (c.g >= cMax) {
+      h = (c.b - c.r) / delta + 2.0;
+    } else {
+      h = (c.r - c.g) / delta + 4.0;
+    }
+    h /= 6.0;
+  }
+  return vec3(h, s, l);
+}
+
+float hue2rgb(float p, float q, float t) {
+  if (t < 0.0) t += 1.0;
+  if (t > 1.0) t -= 1.0;
+  if (t < 1.0 / 6.0) return p + (q - p) * 6.0 * t;
+  if (t < 1.0 / 2.0) return q;
+  if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+  return p;
+}
+
+vec3 hsl2rgb(vec3 hsl) {
+  if (hsl.y <= 0.00001) return vec3(hsl.z);
+  float q = (hsl.z < 0.5) ? (hsl.z * (1.0 + hsl.y)) : (hsl.z + hsl.y - hsl.z * hsl.y);
+  float p = 2.0 * hsl.z - q;
+  return vec3(
+    hue2rgb(p, q, hsl.x + 1.0 / 3.0),
+    hue2rgb(p, q, hsl.x),
+    hue2rgb(p, q, hsl.x - 1.0 / 3.0)
+  );
+}
+
+vec3 applyBlendMode(int mode, vec3 base, vec3 blend, vec2 fragCoord, float opacity) {
+  vec3 r = blend;
+
+  // 0: Normal
+  if (mode == 0) {
+    r = blend;
+  }
+  // 1: Dissolve
+  else if (mode == 1) {
+    float h = fract(sin(dot(fragCoord, vec2(12.9898, 78.233))) * 43758.5453);
+    r = (h < opacity) ? blend : base;
+  }
+  // 2: Darken
+  else if (mode == 2) {
+    r = min(base, blend);
+  }
+  // 3: Multiply
+  else if (mode == 3) {
+    r = base * blend;
+  }
+  // 4: Color Burn
+  else if (mode == 4) {
+    vec3 invBlend = max(blend, vec3(0.001));
+    r = clamp(vec3(1.0) - (vec3(1.0) - base) / invBlend, vec3(0.0), vec3(1.0));
+  }
+  // 5: Linear Burn
+  else if (mode == 5) {
+    r = max(base + blend - vec3(1.0), vec3(0.0));
+  }
+  // 6: Darker Color
+  else if (mode == 6) {
+    r = getPerceptualLuma(base) < getPerceptualLuma(blend) ? base : blend;
+  }
+  // 7: Lighten
+  else if (mode == 7) {
+    r = max(base, blend);
+  }
+  // 8: Screen
+  else if (mode == 8) {
+    r = vec3(1.0) - (vec3(1.0) - base) * (vec3(1.0) - blend);
+  }
+  // 9: Color Dodge
+  else if (mode == 9) {
+    vec3 invBlend = max(vec3(1.0) - blend, vec3(0.001));
+    r = min(base / invBlend, vec3(1.0));
+  }
+  // 10: Linear Dodge (Add)
+  else if (mode == 10) {
+    r = min(base + blend, vec3(1.0));
+  }
+  // 11: Lighter Color
+  else if (mode == 11) {
+    r = getPerceptualLuma(base) > getPerceptualLuma(blend) ? base : blend;
+  }
+  // 12: Overlay
+  else if (mode == 12) {
+    r = vec3(
+      (base.r < 0.5) ? (2.0 * base.r * blend.r) : (1.0 - 2.0 * (1.0 - base.r) * (1.0 - blend.r)),
+      (base.g < 0.5) ? (2.0 * base.g * blend.g) : (1.0 - 2.0 * (1.0 - base.g) * (1.0 - blend.g)),
+      (base.b < 0.5) ? (2.0 * base.b * blend.b) : (1.0 - 2.0 * (1.0 - base.b) * (1.0 - blend.b))
+    );
+  }
+  // 13: Soft Light
+  else if (mode == 13) {
+    r = vec3(
+      softLightChannel(base.r, blend.r),
+      softLightChannel(base.g, blend.g),
+      softLightChannel(base.b, blend.b)
+    );
+  }
+  // 14: Hard Light
+  else if (mode == 14) {
+    r = vec3(
+      (blend.r < 0.5) ? (2.0 * base.r * blend.r) : (1.0 - 2.0 * (1.0 - base.r) * (1.0 - blend.r)),
+      (blend.g < 0.5) ? (2.0 * base.g * blend.g) : (1.0 - 2.0 * (1.0 - base.g) * (1.0 - blend.g)),
+      (blend.b < 0.5) ? (2.0 * base.b * blend.b) : (1.0 - 2.0 * (1.0 - base.b) * (1.0 - blend.b))
+    );
+  }
+  // 15: Vivid Light
+  else if (mode == 15) {
+    r = vec3(
+      vividLightChannel(base.r, blend.r),
+      vividLightChannel(base.g, blend.g),
+      vividLightChannel(base.b, blend.b)
+    );
+  }
+  // 16: Linear Light
+  else if (mode == 16) {
+    r = clamp(base + 2.0 * blend - vec3(1.0), vec3(0.0), vec3(1.0));
+  }
+  // 17: Pin Light
+  else if (mode == 17) {
+    r = vec3(
+      pinLightChannel(base.r, blend.r),
+      pinLightChannel(base.g, blend.g),
+      pinLightChannel(base.b, blend.b)
+    );
+  }
+  // 18: Hard Mix
+  else if (mode == 18) {
+    vec3 lin = clamp(base + 2.0 * blend - vec3(1.0), vec3(0.0), vec3(1.0));
+    r = step(vec3(0.5), lin);
+  }
+  // 19: Difference
+  else if (mode == 19) {
+    r = abs(base - blend);
+  }
+  // 20: Exclusion
+  else if (mode == 20) {
+    r = base + blend - 2.0 * base * blend;
+  }
+  // 21: Subtract
+  else if (mode == 21) {
+    r = max(base - blend, vec3(0.0));
+  }
+  // 22: Divide
+  else if (mode == 22) {
+    r = min(base / max(blend, vec3(0.001)), vec3(1.0));
+  }
+  // 23: Hue
+  else if (mode == 23) {
+    vec3 bHsl = rgb2hsl(base);
+    vec3 sHsl = rgb2hsl(blend);
+    r = hsl2rgb(vec3(sHsl.x, bHsl.y, bHsl.z));
+  }
+  // 24: Saturation
+  else if (mode == 24) {
+    vec3 bHsl = rgb2hsl(base);
+    vec3 sHsl = rgb2hsl(blend);
+    r = hsl2rgb(vec3(bHsl.x, sHsl.y, bHsl.z));
+  }
+  // 25: Color
+  else if (mode == 25) {
+    vec3 bHsl = rgb2hsl(base);
+    vec3 sHsl = rgb2hsl(blend);
+    r = hsl2rgb(vec3(sHsl.x, sHsl.y, bHsl.z));
+  }
+  // 26: Luminosity
+  else if (mode == 26) {
+    vec3 bHsl = rgb2hsl(base);
+    vec3 sHsl = rgb2hsl(blend);
+    r = hsl2rgb(vec3(bHsl.x, bHsl.y, sHsl.z));
+  }
+
+  return clamp(r, vec3(0.0), vec3(1.0));
+}
 
 void main() {
   vec2 scale = vec2(1.0);
@@ -519,7 +740,48 @@ void main() {
   }
 
   vec2 coveredUV = uv * scale + offset;
-  vec4 texSample = texture(u_texture, coveredUV);
-  fragColor = vec4(texSample.rgb, 1.0);
+  vec4 baseSample = texture(u_texture, coveredUV);
+  vec3 baseColor = baseSample.rgb;
+
+  if (u_overlay_active > 0) {
+    vec2 oScale = vec2(1.0);
+    vec2 oOffset = vec2(0.0);
+    float oAspect = max(0.01, u_overlay_aspect);
+
+    if (u_canvas_aspect > oAspect) {
+      oScale.y = oAspect / u_canvas_aspect;
+      oOffset.y = (1.0 - oScale.y) * 0.5;
+    } else {
+      oScale.x = u_canvas_aspect / oAspect;
+      oOffset.x = (1.0 - oScale.x) * 0.5;
+    }
+
+    vec2 oUv = v_uv;
+    if (u_flip_y > 0.5) {
+      oUv.y = 1.0 - oUv.y;
+    }
+
+    vec2 oCoveredUV = oUv * oScale + oOffset;
+    vec4 overlaySample = texture(u_overlay_texture, oCoveredUV);
+    vec3 overlayColor = overlaySample.rgb;
+
+    vec3 blended = applyBlendMode(
+      u_overlay_blend_mode,
+      baseColor,
+      overlayColor,
+      gl_FragCoord.xy,
+      u_overlay_opacity
+    );
+
+    if (u_overlay_blend_mode == 1) {
+      // Dissolve mode handles opacity dithering inside applyBlendMode
+      baseColor = blended;
+    } else {
+      baseColor = mix(baseColor, blended, u_overlay_opacity * overlaySample.a);
+    }
+  }
+
+  fragColor = vec4(baseColor, 1.0);
 }
 `
+
