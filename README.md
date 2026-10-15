@@ -108,20 +108,19 @@ flowchart TD
     end
 
     subgraph Pass2["Pass 2: Datamosh & Displacement (Full Res FBO: W x H)"]
+        CurrCam & OverlayTex --> CompositeBase[Composite Base: Live Feed + Overlay Video with 27 Blend Modes]
+        CompositeBase --> ContamMask[Alpha Contamination Mask & Mosh Brush]
         MotionFBO --> DualGrid[Dual-Scale Warp: 16-24px & 10-14px]
         DualGrid --> Scatter[Micro-Particle Ejection 4-8px]
         Scatter --> AudioSurge[Multiplicative Audio & Transient Gain]
-        AudioSurge --> AdvectUV[Backward UV Advection]
+        AudioSurge --> AdvectUV[Backward UV Advection of Whole Video]
         PrevFeedback[texFeedback Read] --> AdvectUV
-        AdvectUV --> ContamMask[Alpha Contamination Mask & Brush Blend]
-        CurrCam --> ContamMask
-        ContamMask --> FeedbackFBO[texFeedback Write RGBA8]
+        AdvectUV & ContamMask --> FeedbackFBO[texFeedback Write RGBA8: Moshed Camera + Overlay]
     end
 
-    subgraph Pass3["Pass 3: Display & Overlay Compositing (Screen Canvas)"]
+    subgraph Pass3["Pass 3: Display Presentation (Screen Canvas)"]
         FeedbackFBO --> CoverAspect[Aspect-Ratio Cover Fit]
-        OverlayTex --> BlendModes[27 Photoshop Blend Modes + Opacity]
-        CoverAspect & BlendModes --> MirrorFlip[Horizontal Mirror & Vertical Flip]
+        CoverAspect --> MirrorFlip[Horizontal Mirror & Vertical Flip]
         MirrorFlip --> ScreenCanvas[Canvas Output 60 FPS]
     end
 
@@ -139,14 +138,14 @@ flowchart TD
    - Applies noise-floor gating against camera sensor jitter.
    - Integrates hand velocity and propagates velocity waves backward along motion vectors.
 3. **`DATAMOSH_FRAGMENT_SHADER`**:
+   - Blends the live camera input with the looping video overlay using the chosen Photoshop blend mode and opacity to produce a unified composite base frame.
+   - Applies the **Mosh Brush** directly to this combined stream so hand gestures smear and tear both the camera feed and the overlay video simultaneously.
    - Computes organic macroblock warping along subject contours.
    - Dual-scale macroblock sampling based on local luminance edge contrast.
-   - Micro-particle hashing with pseudo-random speed and angular scatter.
+   - Micro-particle hashing with pseudo-random speed and angular scatter across both camera and overlay pixels.
    - Modulates displacement scale by bass and transient audio energy.
-   - Composites displaced pixels over live camera using the alpha contamination mask.
 4. **`DISPLAY_FRAGMENT_SHADER`**:
    - Hardware aspect-ratio compensation (`object-fit: cover`) preventing distortion.
-   - Composites the looping video overlay using the chosen blend mode and opacity.
    - Real-time horizontal selfie mirror and vertical inversion toggles.
 
 ---

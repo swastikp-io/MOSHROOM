@@ -252,6 +252,13 @@ uniform sampler2D u_prev_frame;
 uniform sampler2D u_prev_feedback;
 uniform sampler2D u_motion_texture; // Sampled with gl.NEAREST
 
+// Video Overlay Uniforms (Blended into the input frame so mosh brush deforms both)
+uniform sampler2D u_overlay_texture;
+uniform int u_overlay_active;
+uniform float u_overlay_opacity;
+uniform int u_overlay_blend_mode;
+uniform float u_overlay_aspect;
+
 uniform vec2 u_resolution;
 uniform float u_macroblock_size;
 uniform float u_displacement_scale;
@@ -278,6 +285,10 @@ float getLuma(vec3 c) {
   return dot(c, vec3(0.299, 0.587, 0.114));
 }
 
+float getPerceptualLuma(vec3 c) {
+  return dot(c, vec3(0.299, 0.587, 0.114));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // SATURATION BOOST: Luminance-preserving, applied only to incoming camera pixels
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -288,225 +299,8 @@ vec3 boostSaturation(vec3 rgb, float satFactor) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SPATIAL VECTOR SMOOTHING & COHESIVE RIBBON FLOW
-// 9-tap neighborhood averaging + velocity snapping for thick macroblock ribbons
+// 27 PHOTOSHOP BLEND MODES & COLOR UTILITIES
 // ═══════════════════════════════════════════════════════════════════════════════
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// FAST SINGLE-TAP MACROBLOCK MOTION LOOKUP
-// Relies on the low-res spatial smoothing already performed in the Motion FBO pass
-// ═══════════════════════════════════════════════════════════════════════════════
-
-vec3 getSingleTapBlockMotion(sampler2D motionTex, vec2 blockUV) {
-  vec4 center = texture(motionTex, blockUV);
-  vec2 vCenter = (center.rg - 0.5) * 2.0;
-
-  if (length(vCenter) < 0.02) {
-    return vec3(0.0);
-  }
-
-  const float VELOCITY_LEVELS = 12.0;
-  vec2 snappedVec = floor(vCenter * VELOCITY_LEVELS + 0.5) / VELOCITY_LEVELS;
-  return vec3(snappedVec, center.b);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// FEATURE CONTRAST MASK: Selective Edge Breakthrough
-// High-contrast features (eyes, lips, nostrils, dark edges) punch through the melt
-// ═══════════════════════════════════════════════════════════════════════════════
-
-float getEdgeContrast(sampler2D tex, vec2 uv, vec2 texelSize) {
-  vec2 offset = texelSize * 2.0;
-  float lumCenter = getLuma(texture(tex, uv).rgb);
-  float lumRight  = getLuma(texture(tex, clamp(uv + vec2(offset.x, 0.0), vec2(0.001), vec2(0.999))).rgb);
-  float lumLeft   = getLuma(texture(tex, clamp(uv - vec2(offset.x, 0.0), vec2(0.001), vec2(0.999))).rgb);
-  float lumUp     = getLuma(texture(tex, clamp(uv + vec2(0.0, offset.y), vec2(0.001), vec2(0.999))).rgb);
-  float lumDown   = getLuma(texture(tex, clamp(uv - vec2(0.0, offset.y), vec2(0.001), vec2(0.999))).rgb);
-
-  float maxDiff = max(
-    max(abs(lumCenter - lumRight), abs(lumCenter - lumLeft)),
-    max(abs(lumCenter - lumUp), abs(lumCenter - lumDown))
-  );
-
-  return maxDiff;
-}
-
-void main() {
-  // 1. Live camera frame at current UV (with 1.5x saturation boost)
-  vec3 liveCamRGB = boostSaturation(texture(u_curr_frame, v_uv).rgb, 1.5);
-
-  // If MOSH AMOUNT == 0, output 100% clean live camera feed (I-frame reset)
-  if (u_intensity <= 0.0) {
-    fragColor = vec4(liveCamRGB, 0.0);
-    return;
-  }
-
-  vec2 texelSize = 1.0 / u_resolution;
-
-  // ═════════════════════════════════════════════════════════════════════════════
-  // 1. ORGANIC MACROBLOCK WARPING & DUAL-SCALE SAMPLING
-  // ═════════════════════════════════════════════════════════════════════════════
-
-  // Low-frequency motion field lookup at continuous UV
-  vec4 rawMotion = texture(u_motion_texture, v_uv);
-  vec2 blurredMotion = (rawMotion.rg - 0.5) * 2.0;
-
-  // Warp sampling coordinates organically along moving subject contours
-  vec2 warpedUV = clamp(v_uv + blurredMotion * 0.15, vec2(0.001), vec2(0.999));
-
-  // Scale 1: Primary Macroblocks (16px–24px)
-  vec2 grid1 = max(vec2(4.0), u_resolution / u_macroblock_size);
-  vec2 blockUV1 = (floor(warpedUV * grid1) + 0.5) / grid1;
-  vec3 motion1 = getSingleTapBlockMotion(u_motion_texture, blockUV1);
-
-  // Scale 2: Secondary Macroblocks (10px–14px)
-  float scale2Size = max(8.0, floor(u_macroblock_size * 0.60));
-  vec2 grid2 = max(vec2(4.0), u_resolution / scale2Size);
-  vec2 blockUV2 = (floor(warpedUV * grid2) + 0.5) / grid2;
-  vec3 motion2 = getSingleTapBlockMotion(u_motion_texture, blockUV2);
-
-  // Local luminance contrast determines blending between primary and secondary macroblocks
-  float edgeContrast = getEdgeContrast(u_curr_frame, v_uv, texelSize);
-  float contrastBlend = smoothstep(0.06, 0.24, edgeContrast);
-
-  vec2 organicMotionVector = mix(motion1.xy, motion2.xy, contrastBlend);
-  float motionMag = length(organicMotionVector);
-
-  // ═════════════════════════════════════════════════════════════════════════════
-  // 2. PER-BLOCK MICRO-PARTICLE SCATTER (Strictly On Active Motion)
-  // ═════════════════════════════════════════════════════════════════════════════
-
-  vec2 effectiveMotion = organicMotionVector;
-  float handDist = length(warpedUV - u_moshHandPos);
-  float brushRadius = max(0.28, u_moshHandRadius);
-  float nearHand = smoothstep(brushRadius, 0.0, handDist) * u_moshHandActive;
-
-  if (motionMag > 0.001) {
-    float microSize = clamp(floor(scale2Size * 0.5), 4.0, 8.0);
-    vec2 microGrid = max(vec2(8.0), u_resolution / microSize);
-    vec2 microCellId = floor(warpedUV * microGrid);
-
-    float cellHash = fract(sin(dot(microCellId, vec2(12.9898, 78.233))) * 43758.5453);
-    float cellHash2 = fract(sin(dot(microCellId + vec2(23.7, 71.9), vec2(26.419, 54.341))) * 28614.7319);
-
-    float speedMultiplier = mix(0.7, 2.2, cellHash);
-    float angleSpread = (cellHash2 - 0.5) * 2.0 * 0.314159; // +/- 18 deg
-    float cosA = cos(angleSpread);
-    float sinA = sin(angleSpread);
-    vec2 spreadMotion = vec2(
-      organicMotionVector.x * cosA - organicMotionVector.y * sinA,
-      organicMotionVector.x * sinA + organicMotionVector.y * cosA
-    );
-
-    float ejectChance = smoothstep(0.06, 0.30, motionMag) * 0.65 + smoothstep(0.05, 0.25, edgeContrast) * 0.35 + nearHand * 0.25;
-    if (cellHash > (1.0 - clamp(ejectChance, 0.15, 0.85))) {
-      effectiveMotion = spreadMotion * speedMultiplier;
-    }
-  }
-
-  // ═════════════════════════════════════════════════════════════════════════════
-  // 3. MULTIPLICATIVE AUDIO GAIN (0.0 * Audio = 0.0)
-  // ═════════════════════════════════════════════════════════════════════════════
-
-  float audioGain = 1.0 + (u_audioBass * 2.0) + (u_audioTransient * 3.0);
-  vec2 totalDisplacement = effectiveMotion * (u_displacement_scale * 1.5 * audioGain);
-
-  // Advect coordinates backward along motion vector
-  vec2 displacedUV = clamp(v_uv - totalDisplacement, vec2(0.001), vec2(0.999));
-  vec4 smearedData = texture(u_prev_feedback, displacedUV);
-
-  // ═════════════════════════════════════════════════════════════════════════════
-  // 4. MOSH CONTAMINATION MASK & LOCALIZED HAND BRUSH (Alpha Channel)
-  //    smearedData.a stores whether a pixel has been displaced/contaminated.
-  //    Uncontaminated pixels (alpha < 0.01) ALWAYS stream live webcam at 60 FPS!
-  // ═════════════════════════════════════════════════════════════════════════════
-
-  float brushDist = length(v_uv - u_moshHandPos);
-  float brushInfluence = smoothstep(brushRadius, brushRadius * 0.25, brushDist);
-  float activeHandSweep = brushInfluence * step(0.1, u_moshHandActive) * smoothstep(0.005, 0.06, motionMag + length(u_moshHandVel));
-
-  float newAlpha = 0.0;
-  if (activeHandSweep > 0.05) {
-    // Ripping fresh blocks from live camera into the mosh stream
-    newAlpha = max(smearedData.a, activeHandSweep);
-  } else if (u_moshHandActive < 0.1) {
-    // Fist closed: LOCK existing sculpted mosh artifacts permanently!
-    newAlpha = smearedData.a;
-  } else {
-    // Hand active elsewhere: carry existing trails forward with slight decay
-    newAlpha = smearedData.a * 0.994;
-  }
-
-  // If no contamination has touched this pixel or its advection source, output LIVE CAMERA!
-  if (newAlpha < 0.01) {
-    fragColor = vec4(liveCamRGB, 0.0);
-    return;
-  }
-
-  // ═════════════════════════════════════════════════════════════════════════════
-  // 5. CONTAMINATED MOSH COMPOSITING OVER LIVE CAMERA
-  // ═════════════════════════════════════════════════════════════════════════════
-
-  vec3 displacedColor = smearedData.rgb;
-
-  // On active motion, mid/highs modulate edge cross-contamination
-  if (motionMag > 0.001 && (u_audioMid > 0.1 || u_audioHigh > 0.1)) {
-    vec2 perpDir = vec2(-effectiveMotion.y, effectiveMotion.x);
-    if (length(perpDir) > 0.0001) {
-      vec2 perpOffset = normalize(perpDir) * texelSize * (u_audioMid * 4.0 + u_audioHigh * 6.0);
-      vec3 smearBlend = texture(u_prev_feedback, clamp(displacedUV + perpOffset, vec2(0.001), vec2(0.999))).rgb;
-      float contamAmount = clamp(u_audioMid * 0.45 + u_audioHigh * 0.55, 0.0, 0.75);
-      displacedColor = mix(displacedColor, smearBlend, contamAmount);
-    }
-  }
-
-  // If this pixel was just newly contaminated by the brush (advected alpha was near 0),
-  // initialize it from the live camera so it rips fresh pixels cleanly
-  if (smearedData.a < 0.08) {
-    displacedColor = liveCamRGB;
-  } else {
-    // Edge breakthrough on fast moving edges
-    float breakthroughMask = smoothstep(u_sub_partition_threshold, u_sub_partition_threshold + 0.12, edgeContrast);
-    float camLeak = breakthroughMask * u_edge_breakthrough * 0.18;
-    displacedColor = mix(displacedColor, liveCamRGB, camLeak);
-  }
-
-  // Composite the moshed pixels over the live camera using newAlpha
-  float blendFactor = clamp(newAlpha, 0.0, 1.0);
-  vec3 finalRGB = mix(liveCamRGB, displacedColor, blendFactor);
-  fragColor = vec4(clamp(finalRGB, 0.0, 1.0), blendFactor);
-}
-`
-
-/**
- * Display Fragment Shader with Multi-Mode Video Overlay Compositing
- * Renders the processed result to the canvas default framebuffer
- * with GPU object-fit: cover behavior preserving camera aspect ratio,
- * and composites an optional looping video overlay with 27 Photoshop blend modes.
- */
-export const DISPLAY_FRAGMENT_SHADER = `#version 300 es
-precision highp float;
-
-in vec2 v_uv;
-
-uniform sampler2D u_texture;
-uniform float u_canvas_aspect;
-uniform float u_video_aspect;
-uniform float u_flip_y;
-uniform float u_flip_x;
-
-// Video Overlay Uniforms
-uniform sampler2D u_overlay_texture;
-uniform int u_overlay_active;
-uniform float u_overlay_opacity;
-uniform int u_overlay_blend_mode;
-uniform float u_overlay_aspect;
-
-out vec4 fragColor;
-
-float getPerceptualLuma(vec3 c) {
-  return dot(c, vec3(0.299, 0.587, 0.114));
-}
 
 float softLightChannel(float b, float s) {
   if (s <= 0.5) {
@@ -717,6 +511,246 @@ vec3 applyBlendMode(int mode, vec3 base, vec3 blend, vec2 fragCoord, float opaci
   return clamp(r, vec3(0.0), vec3(1.0));
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// FAST SINGLE-TAP MACROBLOCK MOTION LOOKUP
+// Relies on the low-res spatial smoothing already performed in the Motion FBO pass
+// ═══════════════════════════════════════════════════════════════════════════════
+
+vec3 getSingleTapBlockMotion(sampler2D motionTex, vec2 blockUV) {
+  vec4 center = texture(motionTex, blockUV);
+  vec2 vCenter = (center.rg - 0.5) * 2.0;
+
+  if (length(vCenter) < 0.02) {
+    return vec3(0.0);
+  }
+
+  const float VELOCITY_LEVELS = 12.0;
+  vec2 snappedVec = floor(vCenter * VELOCITY_LEVELS + 0.5) / VELOCITY_LEVELS;
+  return vec3(snappedVec, center.b);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FEATURE CONTRAST MASK: Selective Edge Breakthrough
+// High-contrast features (eyes, lips, nostrils, dark edges) punch through the melt
+// ═══════════════════════════════════════════════════════════════════════════════
+
+float getEdgeContrast(sampler2D tex, vec2 uv, vec2 texelSize) {
+  vec2 offset = texelSize * 2.0;
+  float lumCenter = getLuma(texture(tex, uv).rgb);
+  float lumRight  = getLuma(texture(tex, clamp(uv + vec2(offset.x, 0.0), vec2(0.001), vec2(0.999))).rgb);
+  float lumLeft   = getLuma(texture(tex, clamp(uv - vec2(offset.x, 0.0), vec2(0.001), vec2(0.999))).rgb);
+  float lumUp     = getLuma(texture(tex, clamp(uv + vec2(0.0, offset.y), vec2(0.001), vec2(0.999))).rgb);
+  float lumDown   = getLuma(texture(tex, clamp(uv - vec2(0.0, offset.y), vec2(0.001), vec2(0.999))).rgb);
+
+  float maxDiff = max(
+    max(abs(lumCenter - lumRight), abs(lumCenter - lumLeft)),
+    max(abs(lumCenter - lumUp), abs(lumCenter - lumDown))
+  );
+
+  return maxDiff;
+}
+
+void main() {
+  // 1. Live camera frame at current UV (with 1.5x saturation boost)
+  vec3 liveCamRGB = boostSaturation(texture(u_curr_frame, v_uv).rgb, 1.5);
+  vec3 compositeBaseRGB = liveCamRGB;
+
+  // Composite the looping video overlay onto the live camera feed before mosh deformation
+  // This ensures the mosh brush effects deform the whole video (live feed + overlayed video)
+  if (u_overlay_active > 0) {
+    vec2 oScale = vec2(1.0);
+    vec2 oOffset = vec2(0.0);
+    float vidAspect = u_resolution.x / max(1.0, u_resolution.y);
+    float oAspect = max(0.01, u_overlay_aspect);
+
+    if (vidAspect > oAspect) {
+      oScale.y = oAspect / vidAspect;
+      oOffset.y = (1.0 - oScale.y) * 0.5;
+    } else {
+      oScale.x = vidAspect / oAspect;
+      oOffset.x = (1.0 - oScale.x) * 0.5;
+    }
+
+    vec2 oCoveredUV = v_uv * oScale + oOffset;
+    vec4 overlaySample = texture(u_overlay_texture, oCoveredUV);
+    vec3 overlayColor = overlaySample.rgb;
+
+    vec3 blended = applyBlendMode(
+      u_overlay_blend_mode,
+      liveCamRGB,
+      overlayColor,
+      gl_FragCoord.xy,
+      u_overlay_opacity
+    );
+
+    if (u_overlay_blend_mode == 1) {
+      compositeBaseRGB = blended;
+    } else {
+      compositeBaseRGB = mix(liveCamRGB, blended, u_overlay_opacity * overlaySample.a);
+    }
+  }
+
+  // If MOSH AMOUNT == 0, output 100% clean composite feed (I-frame reset)
+  if (u_intensity <= 0.0) {
+    fragColor = vec4(compositeBaseRGB, 0.0);
+    return;
+  }
+
+  vec2 texelSize = 1.0 / u_resolution;
+
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 1. ORGANIC MACROBLOCK WARPING & DUAL-SCALE SAMPLING
+  // ═════════════════════════════════════════════════════════════════════════════
+
+  // Low-frequency motion field lookup at continuous UV
+  vec4 rawMotion = texture(u_motion_texture, v_uv);
+  vec2 blurredMotion = (rawMotion.rg - 0.5) * 2.0;
+
+  // Warp sampling coordinates organically along moving subject contours
+  vec2 warpedUV = clamp(v_uv + blurredMotion * 0.15, vec2(0.001), vec2(0.999));
+
+  // Scale 1: Primary Macroblocks (16px–24px)
+  vec2 grid1 = max(vec2(4.0), u_resolution / u_macroblock_size);
+  vec2 blockUV1 = (floor(warpedUV * grid1) + 0.5) / grid1;
+  vec3 motion1 = getSingleTapBlockMotion(u_motion_texture, blockUV1);
+
+  // Scale 2: Secondary Macroblocks (10px–14px)
+  float scale2Size = max(8.0, floor(u_macroblock_size * 0.60));
+  vec2 grid2 = max(vec2(4.0), u_resolution / scale2Size);
+  vec2 blockUV2 = (floor(warpedUV * grid2) + 0.5) / grid2;
+  vec3 motion2 = getSingleTapBlockMotion(u_motion_texture, blockUV2);
+
+  // Local luminance contrast determines blending between primary and secondary macroblocks
+  float edgeContrast = getEdgeContrast(u_curr_frame, v_uv, texelSize);
+  float contrastBlend = smoothstep(0.06, 0.24, edgeContrast);
+
+  vec2 organicMotionVector = mix(motion1.xy, motion2.xy, contrastBlend);
+  float motionMag = length(organicMotionVector);
+
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 2. PER-BLOCK MICRO-PARTICLE SCATTER (Strictly On Active Motion)
+  // ═════════════════════════════════════════════════════════════════════════════
+
+  vec2 effectiveMotion = organicMotionVector;
+  float handDist = length(warpedUV - u_moshHandPos);
+  float brushRadius = max(0.28, u_moshHandRadius);
+  float nearHand = smoothstep(brushRadius, 0.0, handDist) * u_moshHandActive;
+
+  if (motionMag > 0.001) {
+    float microSize = clamp(floor(scale2Size * 0.5), 4.0, 8.0);
+    vec2 microGrid = max(vec2(8.0), u_resolution / microSize);
+    vec2 microCellId = floor(warpedUV * microGrid);
+
+    float cellHash = fract(sin(dot(microCellId, vec2(12.9898, 78.233))) * 43758.5453);
+    float cellHash2 = fract(sin(dot(microCellId + vec2(23.7, 71.9), vec2(26.419, 54.341))) * 28614.7319);
+
+    float speedMultiplier = mix(0.7, 2.2, cellHash);
+    float angleSpread = (cellHash2 - 0.5) * 2.0 * 0.314159; // +/- 18 deg
+    float cosA = cos(angleSpread);
+    float sinA = sin(angleSpread);
+    vec2 spreadMotion = vec2(
+      organicMotionVector.x * cosA - organicMotionVector.y * sinA,
+      organicMotionVector.x * sinA + organicMotionVector.y * cosA
+    );
+
+    float ejectChance = smoothstep(0.06, 0.30, motionMag) * 0.65 + smoothstep(0.05, 0.25, edgeContrast) * 0.35 + nearHand * 0.25;
+    if (cellHash > (1.0 - clamp(ejectChance, 0.15, 0.85))) {
+      effectiveMotion = spreadMotion * speedMultiplier;
+    }
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 3. MULTIPLICATIVE AUDIO GAIN (0.0 * Audio = 0.0)
+  // ═════════════════════════════════════════════════════════════════════════════
+
+  float audioGain = 1.0 + (u_audioBass * 2.0) + (u_audioTransient * 3.0);
+  vec2 totalDisplacement = effectiveMotion * (u_displacement_scale * 1.5 * audioGain);
+
+  // Advect coordinates backward along motion vector
+  vec2 displacedUV = clamp(v_uv - totalDisplacement, vec2(0.001), vec2(0.999));
+  vec4 smearedData = texture(u_prev_feedback, displacedUV);
+
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 4. MOSH CONTAMINATION MASK & LOCALIZED HAND BRUSH (Alpha Channel)
+  //    smearedData.a stores whether a pixel has been displaced/contaminated.
+  //    Uncontaminated pixels (alpha < 0.01) stream clean compositeBaseRGB at 60 FPS!
+  // ═════════════════════════════════════════════════════════════════════════════
+
+  float brushDist = length(v_uv - u_moshHandPos);
+  float brushInfluence = smoothstep(brushRadius, brushRadius * 0.25, brushDist);
+  float activeHandSweep = brushInfluence * step(0.1, u_moshHandActive) * smoothstep(0.005, 0.06, motionMag + length(u_moshHandVel));
+
+  float newAlpha = 0.0;
+  if (activeHandSweep > 0.05) {
+    // Ripping fresh blocks from live camera + overlay into the mosh stream
+    newAlpha = max(smearedData.a, activeHandSweep);
+  } else if (u_moshHandActive < 0.1) {
+    // Fist closed: LOCK existing sculpted mosh artifacts permanently!
+    newAlpha = smearedData.a;
+  } else {
+    // Hand active elsewhere: carry existing trails forward with slight decay
+    newAlpha = smearedData.a * 0.994;
+  }
+
+  // If no contamination has touched this pixel or its advection source, output clean composite!
+  if (newAlpha < 0.01) {
+    fragColor = vec4(compositeBaseRGB, 0.0);
+    return;
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 5. CONTAMINATED MOSH COMPOSITING OVER COMPOSITE BASE
+  // ═════════════════════════════════════════════════════════════════════════════
+
+  vec3 displacedColor = smearedData.rgb;
+
+  // On active motion, mid/highs modulate edge cross-contamination
+  if (motionMag > 0.001 && (u_audioMid > 0.1 || u_audioHigh > 0.1)) {
+    vec2 perpDir = vec2(-effectiveMotion.y, effectiveMotion.x);
+    if (length(perpDir) > 0.0001) {
+      vec2 perpOffset = normalize(perpDir) * texelSize * (u_audioMid * 4.0 + u_audioHigh * 6.0);
+      vec3 smearBlend = texture(u_prev_feedback, clamp(displacedUV + perpOffset, vec2(0.001), vec2(0.999))).rgb;
+      float contamAmount = clamp(u_audioMid * 0.45 + u_audioHigh * 0.55, 0.0, 0.75);
+      displacedColor = mix(displacedColor, smearBlend, contamAmount);
+    }
+  }
+
+  // If this pixel was just newly contaminated by the brush (advected alpha was near 0),
+  // initialize it from the composite feed (camera + overlay) so it rips fresh pixels cleanly
+  if (smearedData.a < 0.08) {
+    displacedColor = compositeBaseRGB;
+  } else {
+    // Edge breakthrough on fast moving edges
+    float breakthroughMask = smoothstep(u_sub_partition_threshold, u_sub_partition_threshold + 0.12, edgeContrast);
+    float camLeak = breakthroughMask * u_edge_breakthrough * 0.18;
+    displacedColor = mix(displacedColor, compositeBaseRGB, camLeak);
+  }
+
+  // Composite the moshed pixels over the clean composite base using newAlpha
+  float blendFactor = clamp(newAlpha, 0.0, 1.0);
+  vec3 finalRGB = mix(compositeBaseRGB, displacedColor, blendFactor);
+  fragColor = vec4(clamp(finalRGB, 0.0, 1.0), blendFactor);
+}
+`
+
+/**
+ * Display Fragment Shader
+ * Renders the processed result to the canvas default framebuffer
+ * with GPU object-fit: cover behavior preserving camera aspect ratio.
+ */
+export const DISPLAY_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+
+in vec2 v_uv;
+
+uniform sampler2D u_texture;
+uniform float u_canvas_aspect;
+uniform float u_video_aspect;
+uniform float u_flip_y;
+uniform float u_flip_x;
+
+out vec4 fragColor;
+
 void main() {
   vec2 scale = vec2(1.0);
   vec2 offset = vec2(0.0);
@@ -740,48 +774,9 @@ void main() {
   }
 
   vec2 coveredUV = uv * scale + offset;
-  vec4 baseSample = texture(u_texture, coveredUV);
-  vec3 baseColor = baseSample.rgb;
-
-  if (u_overlay_active > 0) {
-    vec2 oScale = vec2(1.0);
-    vec2 oOffset = vec2(0.0);
-    float oAspect = max(0.01, u_overlay_aspect);
-
-    if (u_canvas_aspect > oAspect) {
-      oScale.y = oAspect / u_canvas_aspect;
-      oOffset.y = (1.0 - oScale.y) * 0.5;
-    } else {
-      oScale.x = u_canvas_aspect / oAspect;
-      oOffset.x = (1.0 - oScale.x) * 0.5;
-    }
-
-    vec2 oUv = v_uv;
-    if (u_flip_y > 0.5) {
-      oUv.y = 1.0 - oUv.y;
-    }
-
-    vec2 oCoveredUV = oUv * oScale + oOffset;
-    vec4 overlaySample = texture(u_overlay_texture, oCoveredUV);
-    vec3 overlayColor = overlaySample.rgb;
-
-    vec3 blended = applyBlendMode(
-      u_overlay_blend_mode,
-      baseColor,
-      overlayColor,
-      gl_FragCoord.xy,
-      u_overlay_opacity
-    );
-
-    if (u_overlay_blend_mode == 1) {
-      // Dissolve mode handles opacity dithering inside applyBlendMode
-      baseColor = blended;
-    } else {
-      baseColor = mix(baseColor, blended, u_overlay_opacity * overlaySample.a);
-    }
-  }
-
-  fragColor = vec4(baseColor, 1.0);
+  vec4 texSample = texture(u_texture, coveredUV);
+  fragColor = vec4(texSample.rgb, 1.0);
 }
 `
+
 

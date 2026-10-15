@@ -366,20 +366,28 @@ test('video overlay blend modes: all 27 Photoshop modes are categorized without 
   assert.equal(getBlendModeGlIndex('unknown' as unknown as BlendModeId), 0)
 })
 
-test('DISPLAY_FRAGMENT_SHADER includes video overlay uniforms and 27 blend mode shader branches', () => {
-  assert.ok(DISPLAY_FRAGMENT_SHADER.includes('u_overlay_texture'))
-  assert.ok(DISPLAY_FRAGMENT_SHADER.includes('u_overlay_active'))
-  assert.ok(DISPLAY_FRAGMENT_SHADER.includes('u_overlay_opacity'))
-  assert.ok(DISPLAY_FRAGMENT_SHADER.includes('u_overlay_blend_mode'))
-  assert.ok(DISPLAY_FRAGMENT_SHADER.includes('u_overlay_aspect'))
-  assert.ok(DISPLAY_FRAGMENT_SHADER.includes('applyBlendMode'))
+test('DATAMOSH_FRAGMENT_SHADER integrates video overlay uniforms and 27 blend modes into mosh deformation', () => {
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('u_overlay_texture'))
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('u_overlay_active'))
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('u_overlay_opacity'))
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('u_overlay_blend_mode'))
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('u_overlay_aspect'))
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('compositeBaseRGB'))
+  assert.ok(DATAMOSH_FRAGMENT_SHADER.includes('applyBlendMode'))
 
   // Verify all 27 mode branches (mode == 0 through mode == 26) exist in GLSL
   for (let i = 0; i <= 26; i++) {
     assert.ok(
-      DISPLAY_FRAGMENT_SHADER.includes(`mode == ${i}`),
-      `DISPLAY_FRAGMENT_SHADER missing branch for blend mode ${i}`,
+      DATAMOSH_FRAGMENT_SHADER.includes(`mode == ${i}`),
+      `DATAMOSH_FRAGMENT_SHADER missing branch for blend mode ${i}`,
     )
   }
+
+  // Verify DISPLAY_FRAGMENT_SHADER preserves aspect ratio cover and flip controls
+  assert.ok(DISPLAY_FRAGMENT_SHADER.includes('u_texture'))
+  assert.ok(DISPLAY_FRAGMENT_SHADER.includes('u_canvas_aspect'))
+  assert.ok(DISPLAY_FRAGMENT_SHADER.includes('u_video_aspect'))
+  assert.ok(DISPLAY_FRAGMENT_SHADER.includes('u_flip_y'))
+  assert.ok(DISPLAY_FRAGMENT_SHADER.includes('u_flip_x'))
 })
 

@@ -237,6 +237,11 @@ export class DatamoshRenderer {
       u_prev_frame: gl.getUniformLocation(this.progMosh, 'u_prev_frame'),
       u_prev_feedback: gl.getUniformLocation(this.progMosh, 'u_prev_feedback'),
       u_motion_texture: gl.getUniformLocation(this.progMosh, 'u_motion_texture'),
+      u_overlay_texture: gl.getUniformLocation(this.progMosh, 'u_overlay_texture'),
+      u_overlay_active: gl.getUniformLocation(this.progMosh, 'u_overlay_active'),
+      u_overlay_opacity: gl.getUniformLocation(this.progMosh, 'u_overlay_opacity'),
+      u_overlay_blend_mode: gl.getUniformLocation(this.progMosh, 'u_overlay_blend_mode'),
+      u_overlay_aspect: gl.getUniformLocation(this.progMosh, 'u_overlay_aspect'),
       u_resolution: gl.getUniformLocation(this.progMosh, 'u_resolution'),
       u_macroblock_size: gl.getUniformLocation(this.progMosh, 'u_macroblock_size'),
       u_displacement_scale: gl.getUniformLocation(this.progMosh, 'u_displacement_scale'),
@@ -263,11 +268,6 @@ export class DatamoshRenderer {
       u_video_aspect: gl.getUniformLocation(this.progDisplay, 'u_video_aspect'),
       u_flip_y: gl.getUniformLocation(this.progDisplay, 'u_flip_y'),
       u_flip_x: gl.getUniformLocation(this.progDisplay, 'u_flip_x'),
-      u_overlay_texture: gl.getUniformLocation(this.progDisplay, 'u_overlay_texture'),
-      u_overlay_active: gl.getUniformLocation(this.progDisplay, 'u_overlay_active'),
-      u_overlay_opacity: gl.getUniformLocation(this.progDisplay, 'u_overlay_opacity'),
-      u_overlay_blend_mode: gl.getUniformLocation(this.progDisplay, 'u_overlay_blend_mode'),
-      u_overlay_aspect: gl.getUniformLocation(this.progDisplay, 'u_overlay_aspect'),
     }
   }
 
@@ -716,27 +716,7 @@ export class DatamoshRenderer {
     gl.uniform2f(this.uniformsMosh.u_moshHandVel, this.moshHandVel[0], this.moshHandVel[1])
     gl.uniform1f(this.uniformsMosh.u_moshHandRadius, this.moshHandRadius)
 
-    gl.drawArrays(gl.TRIANGLES, 0, 3)
-
-    // 4. PASS 3: Display to canvas default framebuffer (with aspect-ratio cover)
-    this.drawToScreen(this.texFeedback[this.feedbackWrite])
-
-    // Ping-pong swaps for feedback
-    this.feedbackRead = 1 - this.feedbackRead
-    this.feedbackWrite = 1 - this.feedbackWrite
-  }
-
-  private drawToScreen(sourceTexture: WebGLTexture | null): void {
-    if (!sourceTexture) return
-    const gl = this.gl!
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
-    gl.viewport(0, 0, this.canvas.width, this.canvas.height)
-    gl.useProgram(this.progDisplay)
-
-    gl.activeTexture(gl.TEXTURE0)
-    gl.bindTexture(gl.TEXTURE_2D, sourceTexture)
-    gl.uniform1i(this.uniformsDisplay.u_texture, 0)
-
+    // Unit 4: Video Overlay texture (feeds directly into the composite base so mosh brush deforms both)
     let overlayActive = 0
     let overlayAspect = 1.0
 
@@ -760,7 +740,7 @@ export class DatamoshRenderer {
         this.lastOverlayVideoTime = -1
       }
 
-      gl.activeTexture(gl.TEXTURE1)
+      gl.activeTexture(gl.TEXTURE4)
       gl.bindTexture(gl.TEXTURE_2D, this.texOverlay)
 
       if (this.overlayVideo.currentTime !== this.lastOverlayVideoTime) {
@@ -778,11 +758,38 @@ export class DatamoshRenderer {
 
       overlayActive = 1
     } else {
-      gl.activeTexture(gl.TEXTURE1)
+      gl.activeTexture(gl.TEXTURE4)
       if (this.texOverlay) {
         gl.bindTexture(gl.TEXTURE_2D, this.texOverlay)
       }
     }
+
+    gl.uniform1i(this.uniformsMosh.u_overlay_texture, 4)
+    gl.uniform1i(this.uniformsMosh.u_overlay_active, overlayActive)
+    gl.uniform1f(this.uniformsMosh.u_overlay_opacity, this.overlayOpacity)
+    gl.uniform1i(this.uniformsMosh.u_overlay_blend_mode, this.overlayBlendMode)
+    gl.uniform1f(this.uniformsMosh.u_overlay_aspect, overlayAspect)
+
+    gl.drawArrays(gl.TRIANGLES, 0, 3)
+
+    // 4. PASS 3: Display to canvas default framebuffer (with aspect-ratio cover)
+    this.drawToScreen(this.texFeedback[this.feedbackWrite])
+
+    // Ping-pong swaps for feedback
+    this.feedbackRead = 1 - this.feedbackRead
+    this.feedbackWrite = 1 - this.feedbackWrite
+  }
+
+  private drawToScreen(sourceTexture: WebGLTexture | null): void {
+    if (!sourceTexture) return
+    const gl = this.gl!
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height)
+    gl.useProgram(this.progDisplay)
+
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, sourceTexture)
+    gl.uniform1i(this.uniformsDisplay.u_texture, 0)
 
     const canvasAspect = this.canvas.width / Math.max(1, this.canvas.height)
     const videoAspect = this.videoWidth / Math.max(1, this.videoHeight)
@@ -791,12 +798,6 @@ export class DatamoshRenderer {
     gl.uniform1f(this.uniformsDisplay.u_video_aspect, videoAspect)
     gl.uniform1f(this.uniformsDisplay.u_flip_y, this.flipY ? 1.0 : 0.0)
     gl.uniform1f(this.uniformsDisplay.u_flip_x, this.flipX ? 1.0 : 0.0)
-
-    gl.uniform1i(this.uniformsDisplay.u_overlay_texture, 1)
-    gl.uniform1i(this.uniformsDisplay.u_overlay_active, overlayActive)
-    gl.uniform1f(this.uniformsDisplay.u_overlay_opacity, this.overlayOpacity)
-    gl.uniform1i(this.uniformsDisplay.u_overlay_blend_mode, this.overlayBlendMode)
-    gl.uniform1f(this.uniformsDisplay.u_overlay_aspect, overlayAspect)
 
     gl.drawArrays(gl.TRIANGLES, 0, 3)
   }
